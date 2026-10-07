@@ -968,7 +968,7 @@ export const register: Register = (on, options) => {
 
     const { Box, Button, Text } = $.ui.resolve(e)
     const again = live.lastTurn
-    const judge = (label: string) =>
+    const judgeButton = (label: string) =>
       again === null ? null : (
         <Button key="retry" label={label} hotkey="r" plain dimColor onPress={() => startJudging($, live, settings, toast, keepTurn, again, true).catch(() => {})} />
       )
@@ -977,7 +977,7 @@ export const register: Register = (on, options) => {
       return (
         <Box justifyContent="space-between">
           <Text dimColor>JEV: not judged · /jev</Text>
-          {retry ? judge('↻ Judge') : null}
+          {retry ? judgeButton('↻ Judge') : null}
         </Box>
       )
     }
@@ -1021,7 +1021,7 @@ export const register: Register = (on, options) => {
     return (
       <Box justifyContent="space-between">
         {rows}
-        {judge('↻ Retry')}
+        {judgeButton('↻ Retry')}
       </Box>
     )
   })
