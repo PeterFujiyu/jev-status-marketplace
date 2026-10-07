@@ -1,6 +1,6 @@
 {
   "name": "jev-status",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Asks TypeSafe Jev whether each turn left the task done, needaction or failed (and Claude when Jev is unsure), and shows the verdict above the prompt",
   "author": { "name": "peter" },
   "types": "./types/index.d.ts",
@@ -27,14 +27,14 @@
     "claude_view": {
       "type": "string",
       "title": "Claude's view",
-      "description": "summary: Claude reads what Jev read (prompt, final message, tool errors). conversation: Claude reads the whole session; this always uses the session's own model.",
-      "options": ["summary", "conversation"],
-      "default": "summary"
+      "description": "summary: the review model reads what Jev read (prompt, final message, tool errors). summary-then-conversation: the same, and when that is not enough to tell, the session's own model re-reads the whole session (from cache). conversation: always the whole session.",
+      "options": ["summary", "summary-then-conversation", "conversation"],
+      "default": "summary-then-conversation"
     },
     "review_model": {
       "type": "string",
       "title": "Claude review model",
-      "description": "Model for Claude's review in the summary view: an alias (haiku, sonnet, opus) or a full model id.",
+      "description": "Model for the summary review: an alias (haiku, sonnet, opus) or a full model id. The whole-session review always uses the session's own model, so it reads the conversation from cache.",
       "default": "haiku"
     },
     "claude_on_jev_failure": {

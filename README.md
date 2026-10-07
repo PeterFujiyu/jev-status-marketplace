@@ -8,7 +8,11 @@ it asks Claude for a second opinion and shows that instead.
 ```
 JEV: ● needs action 96%
 JEV: ✘ failed · Claude (Jev 55%)
+JEV: ✔ done · Claude, full session (Jev 40%)
 ```
+
+Who decides, in order: Jev; below its confidence threshold, a quick Claude review of the same
+summary; and if that review can't tell, the session's own model re-reading the whole session.
 
 ## Install
 
@@ -33,8 +37,8 @@ Without a key nothing goes to TypeSafe; Claude judges each turn instead (unless 
 | TypeSafe API key | empty | see above |
 | Toast each verdict | on | also show each verdict as a toast |
 | Ask Claude below (% Jev confidence) | 70 | below this, Claude gives a second opinion and its answer is shown; 0 never asks |
-| Claude's view | summary | `summary`: Claude reads what Jev read. `conversation`: Claude reads the whole session (more accurate, more tokens; always the session's own model) |
-| Claude review model | haiku | model for the `summary` view: an alias (`haiku`, `sonnet`, `opus`) or a full model id |
+| Claude's view | summary-then-conversation | `summary`: the review model reads what Jev read. `summary-then-conversation`: the same, and when that is not enough to tell, the session's own model re-reads the whole session from cache. `conversation`: always the whole session |
+| Claude review model | haiku | model for the summary review: an alias (`haiku`, `sonnet`, `opus`) or a full model id. The whole-session review always uses the session's own model, so the conversation comes from cache |
 | Ask Claude when Jev can't answer | on | with no TypeSafe key or a Jev error, Claude answers instead of an error showing |
 
 Claude's reviews use your own Claude Code account and count toward its usage. They only run on

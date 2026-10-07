@@ -5,6 +5,8 @@ export type Verdict = {
   status: Status | 'nokey' | 'error'
   /** Who gave `status`: Jev, or Claude when Jev was unsure or could not answer. */
   source: 'jev' | 'claude'
+  /** What Claude read: the summary Jev read, or the whole session. */
+  via?: 'summary' | 'conversation'
   /** Jev's confidence in its own answer, 0–1. */
   confidence?: number
   /** Why Jev gave no answer (`HTTP 401`, `no key`), when Claude stood in or none did. */

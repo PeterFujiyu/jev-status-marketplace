@@ -43,7 +43,8 @@ const RUBRIC = (Object.keys(CRITERIA) as Status[]).map(s => `${s}: ${CRITERIA[s]
 
 const REVIEW_SYSTEM =
   "You judge the status of a user's task at the end of one turn of an AI coding agent. " +
-  'Reply with exactly one word: done, needaction or failed.\n\n' +
+  'Reply with exactly one word: done, needaction or failed, or unclear when what you are ' +
+  'given is not enough to tell.\n\n' +
   RUBRIC
 
 const FORK_PROMPT =
@@ -63,27 +64,34 @@ const LOOK: Record<Verdict['status'], { color?: string; label: string; words: st
 
 type Turn = { prompt: string; answer: string; errors: string[] }
 
+type ClaudeView = 'summary' | 'summary-then-conversation' | 'conversation'
+
 type Settings = {
   apiKey: unknown
   claudeBelow: number
-  claudeView: 'summary' | 'conversation'
+  claudeView: ClaudeView
   reviewModel: string
   claudeOnJevFailure: boolean
 }
+
+const VIEWS: readonly ClaudeView[] = ['summary', 'summary-then-conversation', 'conversation']
 
 const pct = (n: number) => `${Math.round(n * 100)}%`
 
 /** What the verdict says beyond its status: its confidence, or who answered and why. */
 function detail(v: Verdict): string {
   if (v.source === 'claude') {
-    return ` · Claude (${typeof v.confidence === 'number' ? `Jev ${pct(v.confidence)}` : (v.error ?? 'Jev unsure')})`
+    const who = v.via === 'conversation' ? 'Claude, full session' : 'Claude'
+    return ` · ${who} (${typeof v.confidence === 'number' ? `Jev ${pct(v.confidence)}` : (v.error ?? 'Jev unsure')})`
   }
   if (typeof v.confidence === 'number') return ` ${pct(v.confidence)}`
   return v.status === 'error' && v.error ? ` (${v.error})` : ''
 }
 
-function parseStatus(text: string): Status | undefined {
+/** A one-word judgement: a status, `unclear` when the reviewer could not tell, or undefined. */
+function parseStatus(text: string): Status | 'unclear' | undefined {
   const word = text.toLowerCase().replace(/[^a-z ]/g, ' ')
+  if (/\bunclear\b/.test(word)) return 'unclear'
   if (/\bneed(s)? ?action\b/.test(word)) return 'needaction'
   if (/\bfailed\b/.test(word)) return 'failed'
   if (/\bdone\b/.test(word)) return 'done'
@@ -116,23 +124,40 @@ async function askJev($: EngineInterface, key: string, turn: Turn): Promise<Verd
   return { status: answer.choice, source: 'jev', confidence: answer.confidence }
 }
 
-/** Claude's one-word judgement, or undefined when it gave none. */
-async function askClaude($: EngineInterface, s: Settings, turn: Turn): Promise<Status | undefined> {
-  const reply =
-    s.claudeView === 'conversation'
-      ? await $.model.fork({ prompt: FORK_PROMPT })
-      : await $.model.complete({
-          model: s.reviewModel,
-          system: REVIEW_SYSTEM,
-          prompt: JSON.stringify({
-            user_request: turn.prompt,
-            agent_final_message: turn.answer,
-            tool_errors: turn.errors,
-          }),
-          maxTokens: 16,
-          timeoutMs: CLAUDE_TIMEOUT_MS,
-        })
+/** The review model's judgement from what Jev read. */
+async function reviewSummary($: EngineInterface, s: Settings, turn: Turn) {
+  const reply = await $.model.complete({
+    model: s.reviewModel,
+    system: REVIEW_SYSTEM,
+    prompt: JSON.stringify({ user_request: turn.prompt, agent_final_message: turn.answer, tool_errors: turn.errors }),
+    maxTokens: 16,
+    timeoutMs: CLAUDE_TIMEOUT_MS,
+  })
   return reply.isAnswered ? parseStatus(reply.text) : undefined
+}
+
+/**
+ * The session's own model judging from the whole conversation: a fork of the
+ * main thread's last request, so the API serves the conversation from its cache.
+ */
+async function reviewConversation($: EngineInterface) {
+  const reply = await $.model.fork({ prompt: FORK_PROMPT })
+  const status = reply.isAnswered ? parseStatus(reply.text) : undefined
+  return status === 'unclear' ? undefined : status
+}
+
+const isStatus = (s: Status | 'unclear' | undefined): s is Status => s !== undefined && s !== 'unclear'
+
+/** Claude's judgement and which view gave it, or undefined when Claude could not tell. */
+async function askClaude($: EngineInterface, s: Settings, turn: Turn) {
+  if (s.claudeView !== 'conversation') {
+    const summary = await reviewSummary($, s, turn).catch(() => undefined)
+    if (isStatus(summary)) return { status: summary, via: 'summary' as const }
+    if (s.claudeView === 'summary') return undefined
+  }
+  // The summary was not enough (or the person always wants the whole session).
+  const whole = await reviewConversation($).catch(() => undefined)
+  return isStatus(whole) ? { status: whole, via: 'conversation' as const } : undefined
 }
 
 async function judge($: EngineInterface, s: Settings, turn: Turn): Promise<Verdict> {
@@ -143,12 +168,13 @@ async function judge($: EngineInterface, s: Settings, turn: Turn): Promise<Verdi
   const jevUnsure = !jevFailed && typeof jev.confidence === 'number' && jev.confidence * 100 < s.claudeBelow
   if (!(jevUnsure || (jevFailed && s.claudeOnJevFailure))) return jev
 
-  const claude = await askClaude($, s, turn).catch(() => undefined)
-  if (claude === undefined) return jev // Claude gave no usable answer: Jev's stands
+  const claude = await askClaude($, s, turn)
+  if (claude === undefined) return jev // Claude could not tell either: Jev's answer stands
 
   return {
-    status: claude,
+    status: claude.status,
     source: 'claude',
+    via: claude.via,
     confidence: jevUnsure ? jev.confidence : undefined,
     error: jevFailed ? (jev.status === 'nokey' ? 'no Jev key' : `Jev ${jev.error ?? 'error'}`) : undefined,
   }
@@ -158,7 +184,7 @@ export const register: Register = (on, options) => {
   const settings: Settings = {
     apiKey: options.api_key,
     claudeBelow: typeof options.claude_below === 'number' ? options.claude_below : 70,
-    claudeView: options.claude_view === 'conversation' ? 'conversation' : 'summary',
+    claudeView: VIEWS.find(v => v === options.claude_view) ?? 'summary-then-conversation',
     reviewModel:
       typeof options.review_model === 'string' && options.review_model.trim() ? options.review_model.trim() : 'haiku',
     claudeOnJevFailure: options.claude_on_jev_failure !== false,

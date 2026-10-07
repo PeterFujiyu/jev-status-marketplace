@@ -22,14 +22,14 @@ const jevSays = (choice: string, confidence: number): JevReply => ({
 })
 
 // The engine beneath the plugin: no key in the environment, TypeSafe answering
-// with `jev`, Claude answering with `claude`, and pass-through answers for the
-// events the plugin hooks.
-function world(on: On, jev: JevReply, claude = 'failed') {
+// with `jev`, the summary review answering `claude`, the whole-session review
+// answering `session`, and pass-through answers for the events the plugin hooks.
+function world(on: On, jev: JevReply, claude = 'failed', session = claude) {
   const sent: Sent[] = []
   const completes: ModelCompleteRequest[] = []
   const forks: string[] = []
   const toasts: string[] = []
-  const answer = (): ModelCompleteResult => ({ isAnswered: true, text: claude, usage: USAGE })
+  const reply = (text: string): ModelCompleteResult => ({ isAnswered: true, text, usage: USAGE })
 
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   mock.env(on, { HOME: '/h' })
@@ -40,11 +40,11 @@ function world(on: On, jev: JevReply, claude = 'failed') {
   })
   on('model.complete', (_$, e) => {
     completes.push(e)
-    return { value: answer() }
+    return { value: reply(claude) }
   })
   on('model.fork', (_$, e) => {
     forks.push(e.prompt)
-    return { value: answer() }
+    return { value: reply(session) }
   })
   on('ui.toast', (_$, e) => {
     toasts.push(e.text)
@@ -150,7 +150,36 @@ test(
 
     expect(completes.length).toBe(0)
     expect(forks.length).toBe(1)
-    await expectBand($, 'done · Claude (Jev 40%)')
+    await expectBand($, 'done · Claude, full session (Jev 40%)')
+  },
+)
+
+test(
+  'when the summary is not enough, the whole session is read',
+  { options: { api_key: 'k-test' } },
+  async ($, on) => {
+    const { completes, forks, toasts, clock } = world(on, jevSays('done', 0.55), 'unclear', 'failed')
+    await runTurn($)
+    await clock.settle()
+
+    expect(completes.length).toBe(1)
+    expect(forks.length).toBe(1)
+    await expectBand($, 'failed · Claude, full session (Jev 55%)')
+    expect(toasts).toEqual(['failed · Claude, full session (Jev 55%)'])
+  },
+)
+
+test(
+  'the summary-only view does not go on to the whole session',
+  { options: { api_key: 'k-test', claude_view: 'summary' } },
+  async ($, on) => {
+    const { completes, forks, clock } = world(on, jevSays('done', 0.55), 'unclear', 'failed')
+    await runTurn($)
+    await clock.settle()
+
+    expect(completes.length).toBe(1)
+    expect(forks.length).toBe(0)
+    await expectBand($, 'done 55%')
   },
 )
 
@@ -185,12 +214,13 @@ test(
   },
 )
 
-test('if Claude gives no usable answer, Jev\'s stands', { options: { api_key: 'k-test' } }, async ($, on) => {
-  const { completes, clock } = world(on, jevSays('done', 0.5), 'I am not sure')
+test('if neither review can tell, Jev\'s answer stands', { options: { api_key: 'k-test' } }, async ($, on) => {
+  const { completes, forks, clock } = world(on, jevSays('done', 0.5), 'I am not sure', 'unclear')
   await runTurn($)
   await clock.settle()
 
   expect(completes.length).toBe(1)
+  expect(forks.length).toBe(1)
   await expectBand($, 'done 50%')
 })
 
