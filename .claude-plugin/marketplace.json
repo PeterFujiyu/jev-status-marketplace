@@ -8,8 +8,8 @@
     {
       "name": "jev-status",
       "source": "./plugins/jev-status",
-      "description": "Asks TypeSafe Jev whether each turn left the task done, needaction or failed, and whether its work may be deployed to production, development only, or not directly",
-      "version": "0.5.1"
+      "description": "Asks TypeSafe Jev after each turn where the task stands and how ready its deployable work is, and shows both above the prompt",
+      "version": "0.6.0"
     }
   ]
 }

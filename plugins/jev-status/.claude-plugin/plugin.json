@@ -1,7 +1,7 @@
 {
   "name": "jev-status",
-  "version": "0.5.1",
-  "description": "After each turn asks TypeSafe Jev whether the task is done, needaction or failed, and whether the work may be deployed to production, development only, or not directly (Claude gives a second opinion when Jev is unsure), and shows both above the prompt",
+  "version": "0.6.0",
+  "description": "After each turn asks TypeSafe Jev two independent questions, where the task stands (done, needaction, failed) and how ready its deployable work is (production, development, nodeploy, nothing), with Claude as a second opinion and a fail-closed 'needs review' for deploy, and shows both above the prompt",
   "author": {
     "name": "peter"
   },
@@ -23,19 +23,37 @@
     "deploy_check": {
       "type": "boolean",
       "title": "Deploy check",
-      "description": "Also ask whether the turn's work may be deployed: to production, to development only, not directly, or nothing to deploy",
+      "description": "Also ask how ready the turn's deployable work is: production, development only, not deployable, or nothing to deploy",
       "default": true
     },
     "claude_below": {
       "type": "number",
       "title": "Ask Claude below (% Jev confidence)",
-      "description": "When Jev's confidence in an answer is under this percentage, ask Claude for a second opinion on it and show Claude's answer. Applies to each check separately. 0 never asks.",
+      "description": "When Jev's confidence in an answer is under this percentage, ask Claude for a second opinion on it. Used for both questions unless the task or deploy threshold below is set. 0 never asks.",
       "default": 70
+    },
+    "task_below": {
+      "type": "number",
+      "title": "Task threshold (%)",
+      "description": "Overrides 'Ask Claude below' for the task question. Leave empty to use it.",
+      "required": false
+    },
+    "deploy_below": {
+      "type": "number",
+      "title": "Deploy threshold (%)",
+      "description": "Overrides 'Ask Claude below' for the deploy question. Leave empty to use it.",
+      "required": false
+    },
+    "production_below": {
+      "type": "number",
+      "title": "Production threshold (%)",
+      "description": "A stricter threshold for a 'production' answer from Jev; applies only when higher than the deploy threshold. Leave empty to use the deploy threshold.",
+      "required": false
     },
     "claude_view": {
       "type": "string",
       "title": "Claude's view",
-      "description": "summary: the review model reads what Jev read (prompt, final message, tool errors). summary-then-conversation: the same, and when that is not enough to tell, the session's own model re-reads the whole session (from cache). conversation: always the whole session.",
+      "description": "summary: the review model reads what Jev read (prompt and final-message excerpts, tool errors, observed checks). summary-then-conversation: the same, and when that is not enough to tell, the session's own model reviews the session context: the conversation as Claude Code currently holds it, which may already be compacted. conversation: always the session context.",
       "options": [
         "summary",
         "summary-then-conversation",
@@ -46,7 +64,7 @@
     "review_model": {
       "type": "string",
       "title": "Claude review model",
-      "description": "Model for the summary review: an alias (haiku, sonnet, opus) or a full model id. The whole-session review always uses the session's own model, so it reads the conversation from cache.",
+      "description": "Model for the summary review: an alias (haiku, sonnet, opus) or a full model id. The session-context review always uses the session's own model, which lets it reuse the prompt cache.",
       "default": "haiku"
     },
     "claude_on_jev_failure": {
