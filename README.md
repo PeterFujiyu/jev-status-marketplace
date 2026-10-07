@@ -24,6 +24,12 @@ the band focused (never from the prompt). It reuses the same summary and runs a 
 session-context review where one is needed. It is there for working on the plugin and for a
 verdict that went wrong (a timeout, a Jev error), and it appears once a turn has been judged.
 
+The last verdict is kept per session (see *What is kept on disk*), so closing Claude Code or the
+desktop app and resuming the session draws it again, retry included, and so does `/resume` from
+inside a session; `/clear` empties the band. A new prompt clears the kept verdict, as it
+clears the band, until that turn's verdict is in; a session you exit while the band shows
+*checking…* comes back without one.
+
 ## The two questions
 
 **task**: where your request stands. It says nothing about delivery.
@@ -179,7 +185,7 @@ Without a key nothing goes to TypeSafe; Claude judges each turn instead (unless 
 |---|---|---|
 | TypeSafe API key | empty | see above |
 | Toast each verdict | on | also show each verdict as a toast |
-| Retry button | on | show **↻ retry** on the right of the band |
+| Retry button | on | show **↻ retry** on the right of the band; off also keeps no turn excerpts on disk |
 | Ship check | on | also ask the ship and verification questions; off shows only the task row. Left unset, 0.6's *Deploy check* applies |
 | Ask Claude below (% Jev confidence) | 70 | below this, Claude gives a second opinion on that answer; used for both questions unless overridden below; 0 never asks (delivery turns included) |
 | Task threshold (%) | empty | overrides the above for the task question |
@@ -219,6 +225,15 @@ excerpts are your words and Claude's, and tool errors can quote file paths, code
 your project. Anything in them reaches a third party, so don't use the plugin with a TypeSafe key
 on work whose content may not leave your machine (or turn the key off and let Claude judge).
 Claude's second opinions go to Anthropic through Claude Code, like the session itself.
+
+### What is kept on disk
+
+The plugin's own store (a JSON file under your Claude Code configuration directory) keeps, for
+each of the 20 most recent sessions, the last verdict shown and, with the retry button on, the turn
+it judged: the same excerpts that are sent (your message, Claude's final message, tool error
+messages), the observed check states and whether the turn delivered work. It stays on your
+machine. A new prompt removes that session's entry until its verdict is in, and older sessions'
+entries are dropped. Turn the retry button off to keep only the verdicts.
 
 ## Requirements
 

@@ -58,6 +58,7 @@ function world(
   claude = 'status: failed\nship: blocked',
   session = claude,
   env: Record<string, string> = { HOME: '/h' },
+  stored: Record<string, unknown> = {},
 ) {
   const replies: Replies = { jev, claude, session }
   const sent: Sent[] = []
@@ -73,6 +74,17 @@ function world(
 
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
   mock.env(on, env)
+  // The plugin's own store, readable by the test.
+  const store = new Map<string, unknown>(Object.entries(stored))
+  on('store.get', (_$, e) => ({ value: structuredClone(store.get(e.key)) }))
+  on('store.set', (_$, e) => ({ value: void store.set(e.key, structuredClone(e.value)) }))
+  on('store.delete', (_$, e) => ({ value: void store.delete(e.key) }))
+  on('store.keys', () => ({ value: [...store.keys()] }))
+  // The session's id; a /clear or /resume changes it.
+  const current = { id: 'sess-1' }
+  on('session.id', () => ({ value: current.id }))
+  on('session.start', (_$, e) => ({ cwd: e.cwd }))
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
   on('fs.exists', (_$, e) => {
     looked.push(e.path)
     return { value: false }
@@ -119,7 +131,7 @@ function world(
     return <Box />
   })
   const body = (i = sent.length - 1) => JSON.parse(sent[i]!.init?.body ?? '{}')
-  return { replies, sent, body, completes, forks, toasts, looked, clock, release: () => release() }
+  return { replies, sent, body, completes, forks, toasts, looked, clock, store, session: current, release: () => release() }
 }
 
 type TurnSpec = {
@@ -1128,6 +1140,198 @@ test('no retry button before a turn is judged, or with the option off', { option
   await clock.settle()
   await expectBand($, 'done 95%')
   for (const surface of SURFACES) expect(await retryButton($, surface)).toBeUndefined()
+})
+
+// ——— Kept across restarts ———
+
+const START = { cwd: '/repo', surface: 'terminal' as const, isInteractive: true }
+const KEPT_TURN = {
+  prompt: 'Ship the fix.',
+  answer: 'Pushed; all 60 tests pass.',
+  errors: [],
+  errorCount: 0,
+  checks: { tests: 'passed', build: 'unknown', typecheck: 'unknown', lint: 'unknown' },
+  delivered: true,
+  activeBefore: true,
+}
+const keptAt = (at: number, ship = 'production') => ({
+  at,
+  verdict: {
+    status: { choice: 'done', source: 'jev', confidence: 0.95 },
+    ship: { choice: ship, source: 'jev', confidence: 0.91 },
+  },
+  turn: KEPT_TURN,
+  activeBefore: true,
+})
+
+test('each verdict is kept for the session, with the turn it judged', { options: KEY }, async ($, on) => {
+  const { clock, store } = world(on, jevSays('done', 0.95, ['development', 0.88]))
+  await runTurn($)
+  await clock.settle()
+  const kept = store.get('session:sess-1') as ReturnType<typeof keptAt>
+  expect(kept.verdict.ship.choice).toBe('development')
+  expect(kept.verdict.status.choice).toBe('done')
+  expect(kept.turn.answer).toBe('Which AWS profile should I use, staging-admin or staging-ci?')
+  expect(kept.activeBefore).toBe(true)
+
+  // A new prompt forgets it, as the band does, until that turn's verdict.
+  await $.prompt.submit({ text: 'And now?', wait: false, origin: { kind: 'composer' } })
+  expect(store.has('session:sess-1')).toBe(false)
+})
+
+test('a resumed session draws its kept verdict, and retry judges the kept turn', { options: KEY }, async ($, on) => {
+  const { sent, forks, clock } = world(on, jevSays('done', 0.95, ['development', 0.88]), undefined, undefined, undefined, {
+    'session:sess-1': keptAt(5),
+  })
+  await expectNoBand($)
+  await $.session.start(START)
+  await expectBand($, 'JEV task: ', '✔ done 95%', '▲ production 91%')
+  expect(sent.length).toBe(0)
+
+  const band = await $.ui.mount({ plugin: 'jev-status', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
+  await band.press({ key: 'retry' })
+  await band.unmount()
+  await clock.settle()
+  expect(sent.length).toBe(1)
+  expect(JSON.parse(sent[0]!.init?.body ?? '{}').state).toEqual({
+    user_request: 'Ship the fix.',
+    agent_final_message: 'Pushed; all 60 tests pass.',
+    tool_errors: [],
+    tool_error_count: 0,
+    observed_checks: { tests: 'passed', build: 'unknown', typecheck: 'unknown', lint: 'unknown' },
+  })
+  // The kept turn pushed, so ship goes to the session-context review as it did the first time.
+  expect(forks.length).toBe(1)
+  await expectBand($, '■ blocked · Claude, session context (Jev 88%)')
+})
+
+test('a resumed session remembers its last ship answer had active work', { options: KEY }, async ($, on) => {
+  const { forks, clock } = world(on, jevSays('done', 0.95, ['na', 0.95]), undefined, undefined, undefined, {
+    'session:sess-1': keptAt(5),
+  })
+  await $.session.start(START)
+  // "Yes, push it." reads as n/a on its own; after active work it goes to the session-context review.
+  await runTurn($, { prompt: 'Yes, push it.', answer: 'Done.' })
+  await clock.settle()
+  expect(forks.length).toBe(1)
+})
+
+test('a resumed session with nothing kept, or something unreadable, draws nothing', { options: KEY }, async ($, on) => {
+  world(on, jevSays('done', 0.95), undefined, undefined, undefined, {
+    'session:sess-1': { at: 1, verdict: { status: { source: 'jev' } }, turn: KEPT_TURN },
+  })
+  await $.session.start(START)
+  await expectNoBand($)
+  for (const surface of SURFACES) expect(await retryButton($, surface)).toBeUndefined()
+})
+
+test('a kept turn of another shape is not retried', { options: KEY }, async ($, on) => {
+  world(on, jevSays('done', 0.95), undefined, undefined, undefined, {
+    'session:sess-1': { ...keptAt(1), turn: { ...KEPT_TURN, checks: { tests: 'green' } } },
+  })
+  await $.session.start(START)
+  await expectBand($, '▲ production 91%')
+  for (const surface of SURFACES) expect(await retryButton($, surface)).toBeUndefined()
+})
+
+test('a reload keeps the verdict in the session, not an older kept one', { options: KEY }, async ($, on) => {
+  const { clock, store } = world(on, jevSays('done', 0.95, ['development', 0.88]))
+  await runTurn($)
+  await clock.settle()
+  store.set('session:sess-1', keptAt(1, 'blocked'))
+  await $.session.start(START)
+  await expectBand($, '◆ development 88%')
+})
+
+/** Ends the session in this process, as /clear or /resume does, which goes on as `next`. */
+async function switchSession($: Engine, session: { id: string }, reason: 'clear' | 'resume' | 'prompt_input_exit', next: string) {
+  const ending = session.id
+  await $.session.end({ reason, sessionId: ending, resume: { id: ending } })
+  session.id = next
+}
+
+test('/clear forgets the band and the turn retry would judge', { options: KEY }, async ($, on) => {
+  const { clock, session, sent } = world(on, jevSays('done', 0.95))
+  await runTurn($)
+  await clock.settle()
+  await expectBand($, 'done 95%')
+  await switchSession($, session, 'clear', 'sess-2')
+  await clock.settle()
+  await expectNoBand($)
+  for (const surface of SURFACES) expect(await retryButton($, surface)).toBeUndefined()
+  expect(sent.length).toBe(1)
+})
+
+test('a verdict still being judged when /clear runs is dropped', { options: KEY }, async ($, on) => {
+  const { clock, session, store } = world(on, jevSays('done', 0.95))
+  await runTurn($)
+  await switchSession($, session, 'clear', 'sess-2')
+  await clock.settle()
+  await expectNoBand($)
+  expect(store.size).toBe(0)
+})
+
+test('/resume draws the resumed session\'s kept verdict', { options: KEY }, async ($, on) => {
+  const { clock, session, sent } = world(on, jevSays('done', 0.95, ['development', 0.88]), undefined, undefined, undefined, {
+    'session:sess-2': keptAt(5),
+  })
+  await runTurn($)
+  await clock.settle()
+  await expectBand($, '◆ development 88%')
+  await switchSession($, session, 'resume', 'sess-2')
+  await clock.settle()
+  await expectBand($, '▲ production 91%')
+
+  const band = await $.ui.mount({ plugin: 'jev-status', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+  await band.press({ key: 'retry' })
+  await band.unmount()
+  await clock.settle()
+  expect(JSON.parse(sent.at(-1)!.init?.body ?? '{}').state.user_request).toBe('Ship the fix.')
+})
+
+test('/resume never retries the turn of the session it left', { options: KEY }, async ($, on) => {
+  const { clock, session } = world(on, jevSays('done', 0.95), undefined, undefined, undefined, {
+    'session:sess-2': { ...keptAt(5), turn: undefined },
+  })
+  await runTurn($)
+  await clock.settle()
+  await switchSession($, session, 'resume', 'sess-2')
+  await clock.settle()
+  await expectBand($, '▲ production 91%')
+  for (const surface of SURFACES) expect(await retryButton($, surface)).toBeUndefined()
+})
+
+test('leaving the session changes nothing', { options: KEY }, async ($, on) => {
+  const { clock, session } = world(on, jevSays('done', 0.95))
+  await runTurn($)
+  await clock.settle()
+  await switchSession($, session, 'prompt_input_exit', 'sess-1')
+  await clock.settle()
+  await expectBand($, 'done 95%')
+  for (const surface of SURFACES) expect(await retryButton($, surface)).toBeDefined()
+})
+
+test('with the retry button off, the turn is not kept', { options: { ...KEY, retry_button: false } }, async ($, on) => {
+  const { clock, store } = world(on, jevSays('done', 0.95))
+  await runTurn($)
+  await clock.settle()
+  const kept = store.get('session:sess-1') as Record<string, unknown>
+  expect(kept.verdict).toBeDefined()
+  expect(kept.turn).toBeUndefined()
+})
+
+test('only the newest 20 sessions are kept', { options: KEY }, async ($, on) => {
+  const others: Record<string, unknown> = { other: 'not ours' }
+  for (let i = 0; i < 20; i++) others[`session:old-${i}`] = keptAt(i)
+  const { clock, store } = world(on, jevSays('done', 0.95), undefined, undefined, undefined, others)
+  await runTurn($)
+  await clock.settle()
+  const keys = [...store.keys()]
+  expect(keys.filter(k => k.startsWith('session:')).length).toBe(20)
+  expect(keys).toContain('session:sess-1')
+  expect(keys).toContain('other')
+  expect(keys).not.toContain('session:old-0')
+  expect(keys).toContain('session:old-1')
 })
 
 test('a verdict kept from 0.4.0 is ignored, not drawn', { options: KEY }, async ($, on) => {
