@@ -1,6 +1,6 @@
 {
   "name": "jev-status",
-  "version": "0.8.5",
+  "version": "0.8.6",
   "description": "After each turn asks TypeSafe Jev where the task stands (done, needaction, failed) and the highest safe delivery level of the session's active work (production, development, blocked, na), gated by an internal verification check so production needs verification complete; Claude gives second opinions, unsettled answers fail closed, and both rows show above the prompt",
   "author": {
     "name": "peter"
@@ -77,6 +77,13 @@
       "title": "Claude review model",
       "description": "Model for the summary review: an alias (haiku, sonnet, opus) or a full model id. The session-context review always uses the session's own model, which lets it reuse the prompt cache.",
       "default": "haiku"
+    },
+    "cost_saving": {
+      "type": "string",
+      "title": "Cost saving",
+      "description": "on: judging after each turn never runs the session-context review (the session's own model reading the conversation); the task uses the quick summary review instead, and a ship or verification answer that needed it shows needs review until you run /jev. /jev and the band's button always run it. auto: on when Claude Code is billed per token (an API key, or a third-party provider such as Bedrock or Vertex), off on a claude.ai subscription. off: as before.",
+      "options": ["auto", "on", "off"],
+      "default": "auto"
     },
     "claude_on_jev_failure": {
       "type": "boolean",

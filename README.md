@@ -130,6 +130,15 @@ shows `? needs review` with both sides (`Claude suggested production, but Jev fo
 95%`). A review that agrees, or is more cautious, is no conflict; an `incomplete` or `blocked` Jev
 was unsure of is the review's to settle.
 
+**Cost saving.** The session-context review re-reads the session's conversation, so on per-token
+billing it is the plugin's main cost. With **Cost saving** on, judging after a turn never runs
+it: the task uses the quick summary review instead (whatever *Claude's view* says), and a ship or
+verification answer that needed it fails closed, shown as `? needs review · … not reviewed (cost
+saving) · /jev`. `/jev` and the band's button always run it, since you asked. `auto` (the default)
+turns cost saving on when Claude Code is billed per token (an Anthropic API key, or a third-party
+provider such as Bedrock, Vertex or a gateway) and off on a claude.ai subscription; it asks Claude
+Code which credential the session holds, never the credential itself.
+
 When no one can settle a question (with Claude's review turned on; a threshold of 0 opts out of
 reviews, delivery turns included, and Jev's answer then shows as given, even a low-confidence
 `production`):
@@ -215,6 +224,7 @@ Without a key nothing goes to TypeSafe; Claude judges each turn instead (unless 
 | Production threshold (%) | empty | a stricter threshold for a `production` answer from Jev; applies only when higher than the ship threshold |
 | Claude's view | summary-then-conversation | for the **task** question: `summary`: only the quick review of what Jev read. `summary-then-conversation`: the same, then the session-context review when the summary isn't enough. `conversation`: always the session-context review. The ship question always uses the session-context review |
 | Claude review model | haiku | model for the summary review: an alias (`haiku`, `sonnet`, `opus`) or a full model id. The session-context review always uses the session's own model, which lets it reuse the prompt cache |
+| Cost saving | auto | `on`: judging after each turn skips the session-context review (see *Cost saving*); `auto`: on for an API key or a third-party provider, off on a claude.ai subscription; `off`: always review |
 | Ask Claude when Jev can't answer | on | with no TypeSafe key or a Jev error, Claude answers instead of an error showing |
 
 Claude's reviews use your own Claude Code account and count toward its usage. They run on answers

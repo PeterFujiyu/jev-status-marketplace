@@ -85,6 +85,12 @@ function world(
   on('session.id', () => ({ value: current.id }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
+  // The session's Anthropic credential for cost saving's auto: unset answers nothing (an error).
+  const billing: { credential: 'unset' | null | { handle: string; kind: 'bearer' | 'api-key' } } = { credential: 'unset' }
+  on('session.authorize', () => {
+    if (billing.credential === 'unset') throw new Error('no credential reading')
+    return { value: billing.credential }
+  })
   const commands: string[] = []
   on('command.register', (_$, e) => {
     commands.push(e.name)
@@ -136,7 +142,7 @@ function world(
     return <Box />
   })
   const body = (i = sent.length - 1) => JSON.parse(sent[i]!.init?.body ?? '{}')
-  return { replies, sent, body, completes, forks, toasts, looked, clock, store, session: current, commands, release: () => release() }
+  return { replies, sent, body, completes, forks, toasts, looked, clock, store, session: current, commands, billing, release: () => release() }
 }
 
 type TurnSpec = {
@@ -1297,6 +1303,94 @@ test('with judging off and no button, /jev still judges a resumed session\'s tur
   await jev($)
   await clock.settle()
   expect(JSON.parse(sent[0]!.init?.body ?? '{}').state.user_request).toBe('Ship the fix.')
+})
+
+// ——— Cost saving ———
+
+const SAVING_NOTE = 'not reviewed (cost saving) · /jev'
+
+test('cost saving skips the session-context review after a turn, and /jev runs it', { options: { ...KEY, cost_saving: 'on' } }, async ($, on) => {
+  const { forks, completes, toasts, clock } = world(
+    on,
+    jevSays('done', 0.4, ['production', 0.35]),
+    'status: done',
+    'ship: production\nverification: complete',
+  )
+  await runTurn($)
+  await clock.settle()
+  expect(forks.length).toBe(0)
+  expect(completes.length).toBe(1) // the task's quick summary review still runs
+  await expectBand($, '✔ done · Claude (Jev 40%)', `? needs review · Jev suggested production 35%, but ${SAVING_NOTE}`)
+  expect(toasts.at(-1)).toContain(SAVING_NOTE)
+
+  await jev($)
+  await clock.settle()
+  expect(forks.length).toBe(1)
+  await expectBand($, '▲ production · Claude, session context (Jev 35%)')
+})
+
+test('cost saving: the band\'s button runs the session-context review too', { options: { ...KEY, cost_saving: 'on' } }, async ($, on) => {
+  const { forks, clock } = world(on, jevSays('done', 0.95, ['production', 0.35]), 'unused', 'ship: production\nverification: complete')
+  await runTurn($)
+  await clock.settle()
+  expect(forks.length).toBe(0)
+  const band = await $.ui.mount({ plugin: 'jev-status', surface: 'terminal', component: 'AbovePrompt', props: PROPS })
+  await band.press({ key: 'retry' })
+  await band.unmount()
+  await clock.settle()
+  expect(forks.length).toBe(1)
+})
+
+test('cost saving holds for delivery turns and verification too', { options: { ...KEY, cost_saving: 'on' } }, async ($, on) => {
+  const { replies, forks, clock } = world(on, jevSays('done', 0.95, ['production', 0.95]), 'unused', 'ship: production\nverification: complete')
+  await runTurn($, { bash: ['git push'] })
+  await clock.settle()
+  await expectBand($, `? needs review · Jev suggested production 95%, but ${SAVING_NOTE}`)
+
+  replies.jev = jevSays('done', 0.95, ['production', 0.95], ['unknown', 0.4])
+  await runTurn($)
+  await clock.settle()
+  await expectBand($, `? needs review · Jev suggested production 95%, but ${SAVING_NOTE}`)
+  expect(forks.length).toBe(0)
+
+  // A confident Jev needs no review, so cost saving changes nothing.
+  replies.jev = jevSays('done', 0.95, ['production', 0.95])
+  await runTurn($)
+  await clock.settle()
+  await expectBand($, '▲ production 95%')
+})
+
+test('cost saving uses the summary for the task whatever the view', { options: { ...KEY, cost_saving: 'on', claude_view: 'conversation' } }, async ($, on) => {
+  const { forks, completes, clock } = world(on, jevSays('done', 0.4, ['development', 0.95]), 'status: needaction')
+  await runTurn($)
+  await clock.settle()
+  expect([completes.length, forks.length]).toEqual([1, 0])
+  await expectBand($, '● needs action · Claude (Jev 40%)')
+})
+
+test('cost saving auto: on per token, off on a subscription', { options: KEY }, async ($, on) => {
+  const { billing, forks, clock } = world(on, jevSays('done', 0.95, ['production', 0.35]), 'unused', 'ship: production\nverification: complete')
+  const cases: [typeof billing.credential, number][] = [
+    [{ handle: 'h', kind: 'bearer' }, 1], // claude.ai subscription: reviewed
+    [{ handle: 'h', kind: 'api-key' }, 0], // API key: saved
+    [null, 0], // Bedrock, Vertex, a gateway: saved
+  ]
+  for (const [credential, reviews] of cases) {
+    billing.credential = credential
+    const before = forks.length
+    await runTurn($)
+    await clock.settle()
+    expect(forks.length - before).toBe(reviews)
+    await expectBand($, reviews ? '▲ production · Claude, session context' : SAVING_NOTE)
+  }
+})
+
+test('cost saving off reviews even per token', { options: { ...KEY, cost_saving: 'off' } }, async ($, on) => {
+  const { billing, forks, clock } = world(on, jevSays('done', 0.95, ['production', 0.35]), 'unused', 'ship: production\nverification: complete')
+  billing.credential = { handle: 'h', kind: 'api-key' }
+  await runTurn($)
+  await clock.settle()
+  expect(forks.length).toBe(1)
 })
 
 // ——— Kept across restarts ———

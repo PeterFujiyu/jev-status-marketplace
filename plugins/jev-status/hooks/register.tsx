@@ -299,6 +299,26 @@ type Settings = {
   claudeView: ClaudeView
   reviewModel: string
   claudeOnJevFailure: boolean
+  costSaving: CostSaving
+}
+
+/** on: automatic judging never runs the session-context review; auto: on unless billed by subscription. */
+type CostSaving = 'auto' | 'on' | 'off'
+const COST_SAVING: readonly CostSaving[] = ['auto', 'on', 'off']
+const SKIPPED = 'not reviewed (cost saving) · /jev'
+
+/**
+ * Whether this judgement saves the session-context review: never when the person asked for it (/jev,
+ * the band's button); otherwise as set, where auto saves unless the session holds a claude.ai login
+ * (a subscription), so on an API key or a third-party provider, billed per token.
+ */
+async function savesCost($: EngineInterface, s: Settings, manual: boolean): Promise<boolean> {
+  if (manual || s.costSaving === 'off') return false
+  if (s.costSaving === 'on') return true
+  const credential = await $.session.authorize().catch(() => undefined)
+  // Can't tell: judge as before.
+  if (credential === undefined) return false
+  return credential?.kind !== 'bearer'
 }
 
 type Answers = Partial<Record<Question, Answer>>
@@ -460,16 +480,20 @@ async function reviewConversation($: EngineInterface, qs: Question[]): Promise<P
  * are about the session's active work, which only the session context shows, so they
  * go there.
  */
-async function askClaude($: EngineInterface, s: Settings, turn: Turn, qs: Question[]) {
+async function askClaude($: EngineInterface, s: Settings, turn: Turn, qs: Question[], saving: boolean) {
   const picked: Partial<Record<Question, { choice: string; via: 'summary' | 'conversation' }>> = {}
   const sessionWide = (q: Question) => q === 'ship' || q === 'verification'
+  // Saving cost, the task gets the summary review alone, whatever the view.
+  const view = saving ? 'summary' : s.claudeView
   let task = qs.filter(q => !sessionWide(q))
-  if (task.length > 0 && s.claudeView !== 'conversation') {
+  if (task.length > 0 && view !== 'conversation') {
     const summary = await reviewSummary($, s, turn, task).catch((): Picks => ({}))
     for (const q of task) if (summary[q] !== undefined) picked[q] = { choice: summary[q]!, via: 'summary' }
     // The summary was not enough (unless the person wants the summary alone).
-    task = s.claudeView === 'summary' ? [] : task.filter(q => picked[q] === undefined)
+    task = view === 'summary' ? [] : task.filter(q => picked[q] === undefined)
   }
+  // Ship and verification go to the session context alone, which saving cost skips: they stay unsettled.
+  if (saving) return picked
   const forked = [...task, ...qs.filter(sessionWide)]
   if (forked.length === 0) return picked
   const whole = await reviewConversation($, forked).catch((): Picks => ({}))
@@ -477,7 +501,7 @@ async function askClaude($: EngineInterface, s: Settings, turn: Turn, qs: Questi
   return picked
 }
 
-async function judge($: EngineInterface, s: Settings, turn: Turn): Promise<Verdict> {
+async function judge($: EngineInterface, s: Settings, turn: Turn, manual: boolean): Promise<Verdict> {
   const qs = s.questions
   const key = await apiKey($, s.apiKey)
   const jev = key ? await askJev($, key, turn, qs) : allAre(qs, { choice: 'nokey', source: 'jev' })
@@ -503,7 +527,8 @@ async function judge($: EngineInterface, s: Settings, turn: Turn): Promise<Verdi
   const toClaude = qs.filter(q =>
     q === 'verification' ? shipReviewed || (asked(q) && jev.ship?.choice === 'production') : asked(q),
   )
-  const claude = toClaude.length > 0 ? await askClaude($, s, turn, toClaude) : {}
+  const saving = toClaude.length > 0 && (await savesCost($, s, manual))
+  const claude = toClaude.length > 0 ? await askClaude($, s, turn, toClaude, saving) : {}
 
   // Jev's confident finding against the work is evidence the reviewing model (the one that did the
   // work) can't simply overrule: a less cautious answer from it is a conflict, not a replacement.
@@ -534,7 +559,12 @@ async function judge($: EngineInterface, s: Settings, turn: Turn): Promise<Verdi
     } else if (q !== 'status' && toClaude.includes(q) && !failedAnswer(j)) {
       // Fail closed: a ship or verification answer sent to Claude and left unsettled is not Jev's, however
       // sure Jev was. Jev saw only this turn; the review was asked because that wasn't enough.
-      answers[q] = { choice: 'review', source: 'jev', suggested: { choice: j.choice, by: 'jev', confidence: j.confidence } }
+      answers[q] = {
+        choice: 'review',
+        source: 'jev',
+        suggested: { choice: j.choice, by: 'jev', confidence: j.confidence },
+        note: saving ? SKIPPED : undefined,
+      }
     } else {
       answers[q] = j // the task row keeps Jev's answer; a failed ship row stays an error
     }
@@ -696,7 +726,15 @@ async function saveKept($: EngineInterface, kept: Kept | null) {
 }
 
 /** Judges `turn` after the current dispatch, showing "checking…" until its verdict settles. */
-async function startJudging($: EngineInterface, live: Live, s: Settings, toast: boolean, keepTurn: boolean, turn: Turn) {
+async function startJudging(
+  $: EngineInterface,
+  live: Live,
+  s: Settings,
+  toast: boolean,
+  keepTurn: boolean,
+  turn: Turn,
+  manual = false,
+) {
   const mine = ++live.epoch
   await update($, phase, (): Phase => 'checking')
 
@@ -722,7 +760,7 @@ async function startJudging($: EngineInterface, live: Live, s: Settings, toast: 
 
   // Judge after the turn has settled, off this dispatch.
   $.clock.after(0, () => {
-    judge($, s, turn)
+    judge($, s, turn, manual)
       .catch((err: unknown) => failAll(err instanceof Error ? err.message.slice(0, 60) : 'request failed'))
       .then(settle)
       .catch(() => {})
@@ -748,6 +786,7 @@ export const register: Register = (on, options) => {
     reviewModel:
       typeof options.review_model === 'string' && options.review_model.trim() ? options.review_model.trim() : 'haiku',
     claudeOnJevFailure: options.claude_on_jev_failure !== false,
+    costSaving: COST_SAVING.find(c => c === options.cost_saving) ?? 'auto',
   }
 
   let prompt = ''
@@ -796,7 +835,7 @@ export const register: Register = (on, options) => {
   on('command.run', { command: 'jev' }, async $ => {
     const turn = live.lastTurn
     if (turn === null) return { text: 'jev-status: no finished turn to judge yet.' }
-    await startJudging($, live, settings, toast, keepTurn, turn)
+    await startJudging($, live, settings, toast, keepTurn, turn, true)
     return { text: 'jev-status: judging the last turn…' }
   })
 
@@ -911,7 +950,7 @@ export const register: Register = (on, options) => {
     const again = live.lastTurn
     const judge = (label: string) =>
       again === null ? null : (
-        <Button key="retry" label={label} hotkey="r" plain dimColor onPress={() => startJudging($, live, settings, toast, keepTurn, again).catch(() => {})} />
+        <Button key="retry" label={label} hotkey="r" plain dimColor onPress={() => startJudging($, live, settings, toast, keepTurn, again, true).catch(() => {})} />
       )
 
     if (unjudged) {
