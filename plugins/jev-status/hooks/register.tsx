@@ -505,11 +505,25 @@ async function judge($: EngineInterface, s: Settings, turn: Turn): Promise<Verdi
   )
   const claude = toClaude.length > 0 ? await askClaude($, s, turn, toClaude) : {}
 
+  // Jev's confident finding against the work is evidence the reviewing model (the one that did the
+  // work) can't simply overrule: a less cautious answer from it is a conflict, not a replacement.
+  const NEGATIVE: Partial<Record<Question, string>> = { ship: 'blocked', verification: 'incomplete' }
+  const disputes = (q: Question, j: Answer, c: string) =>
+    NEGATIVE[q] !== undefined && j.choice === NEGATIVE[q] && c !== NEGATIVE[q] && !unsure(q, j)
+
   const answers: Answers = {}
   for (const q of qs) {
     const j = jev[q]!
     const c = claude[q]
-    if (c !== undefined) {
+    if (c !== undefined && disputes(q, j, c.choice)) {
+      answers[q] = {
+        choice: 'review',
+        source: 'claude',
+        via: c.via,
+        suggested: { choice: c.choice, by: 'claude' },
+        note: `Jev found ${q === 'ship' ? 'it' : q} ${j.choice} ${pct(j.confidence ?? 0)}`,
+      }
+    } else if (c !== undefined) {
       answers[q] = {
         choice: c.choice,
         source: 'claude',
@@ -517,8 +531,9 @@ async function judge($: EngineInterface, s: Settings, turn: Turn): Promise<Verdi
         confidence: failedAnswer(j) ? undefined : j.confidence,
         error: failedAnswer(j) ? (j.choice === 'nokey' ? 'no Jev key' : `Jev ${j.error ?? 'error'}`) : undefined,
       }
-    } else if (q !== 'status' && toClaude.includes(q) && (unsure(q, j) || continues(q, j))) {
-      // Fail closed: a ship or verification answer Jev couldn't be trusted on, and Claude couldn't settle, is not Jev's.
+    } else if (q !== 'status' && toClaude.includes(q) && !failedAnswer(j)) {
+      // Fail closed: a ship or verification answer sent to Claude and left unsettled is not Jev's, however
+      // sure Jev was. Jev saw only this turn; the review was asked because that wasn't enough.
       answers[q] = { choice: 'review', source: 'jev', suggested: { choice: j.choice, by: 'jev', confidence: j.confidence } }
     } else {
       answers[q] = j // the task row keeps Jev's answer; a failed ship row stays an error
@@ -531,24 +546,26 @@ async function judge($: EngineInterface, s: Settings, turn: Turn): Promise<Verdi
 
 /**
  * The ship answer shown: production only with verification complete and no check
- * seen failing. Incomplete verification (or a failed check) lowers it to
- * development; verification unknown or unsettled turns it into needs review.
- * Every other answer passes unchanged.
+ * seen failing. Incomplete verification lowers it to development (usable, not
+ * verified enough). A check seen failing, or verification unknown, unsettled or
+ * disputed, turns it into needs review: the plugin can't tell what that failure
+ * or doubt means for the work. Every other answer passes unchanged.
  */
 function gate(ship: Answer, verification: Answer | undefined, checks: Checks): Answer {
   if (ship.choice !== 'production') return ship
-  const broken = CHECKS.filter(c => checks[c] === 'failed')
-  const lowered = (why: string): Answer => ({ ...ship, choice: 'development', note: `production gated: ${why}` })
-  if (broken.length > 0) return lowered(`observed ${broken.join(', ')} failed`)
-  const v = verification?.choice
-  if (v === 'complete') return ship
-  if (v === 'incomplete') return lowered('verification incomplete')
-  return {
+  const review = (note: string): Answer => ({
     choice: 'review',
     source: ship.source,
     suggested: { choice: 'production', by: ship.source, confidence: ship.source === 'jev' ? ship.confidence : undefined },
-    note: v === 'unknown' ? 'verification unknown' : 'verification not settled',
-  }
+    note,
+  })
+  const broken = CHECKS.filter(c => checks[c] === 'failed')
+  if (broken.length > 0) return review(`observed ${broken.join(', ')} failed`)
+  const v = verification?.choice
+  if (v === 'complete') return ship
+  if (v === 'incomplete') return { ...ship, choice: 'development', note: 'production gated: verification incomplete' }
+  if (v === 'unknown') return review('verification unknown')
+  return review(verification?.note ?? 'verification not settled')
 }
 
 /** One evaluation as toast words: its choice, and its confidence or who answered. */
@@ -570,9 +587,10 @@ function numberOption(v: unknown): number | undefined {
 
 /**
  * What judging shares across turns: the newest judgement, whether the last ship answer had active
- * work, and the last turn judged, kept so the retry button can judge it again.
+ * work, the last turn judged (kept so the retry button can judge it again), and the session all
+ * that belongs to.
  */
-type Live = { epoch: number; activeBefore: boolean; lastTurn: Turn | null }
+type Live = { epoch: number; activeBefore: boolean; lastTurn: Turn | null; sessionId: string | null }
 
 // The last verdict of each session, kept in $.store so a resumed session (or a reloaded plugin)
 // draws it again; with the retry button on, the turn it judged too, so retry still works.
@@ -634,6 +652,20 @@ async function restoreKept($: EngineInterface, live: Live, retry: boolean) {
   if ((await read($, verdict)) === null && (await read($, phase)) === 'idle') {
     await update($, verdict, () => kept.verdict)
   }
+}
+
+/** Forgets what belonged to the session that ended (/clear, /resume), then takes up what the new one kept. */
+async function takeUpSession($: EngineInterface, live: Live, retry: boolean) {
+  forgetSession(live)
+  await Promise.all([update($, verdict, () => null), update($, phase, (): Phase => 'idle')])
+  await restoreKept($, live, retry)
+}
+
+/** Drops a judgement in flight, and what the next turn and the retry button would take from this session. */
+function forgetSession(live: Live) {
+  live.epoch += 1
+  live.activeBefore = false
+  live.lastTurn = null
 }
 
 /** Keeps this session's verdict (null forgets it), and only the newest sessions' ones. */
@@ -716,7 +748,7 @@ export const register: Register = (on, options) => {
   let delivered = false
   // epoch: bumped by every new turn and every judgement started, so an older one can't settle.
   // activeBefore: whether the last ship answer shown had active work (anything but n/a); Jev errors leave it.
-  const live: Live = { epoch: 0, activeBefore: false, lastTurn: null }
+  const live: Live = { epoch: 0, activeBefore: false, lastTurn: null, sessionId: null }
   const toast = options.toast !== false
   const retry = options.retry_button !== false
   // Bumped by every new turn only: tool results are kept for the turn they started in.
@@ -728,26 +760,20 @@ export const register: Register = (on, options) => {
   // back from what was kept. A verdict still in the session's state (a reload) stays as it is.
   on('session.start', async ($, e, next) => {
     // Nothing kept, or the store can't be read: the band waits for the next turn.
+    live.sessionId = await $.session.id().catch(() => null)
     await restoreKept($, live, retry).catch(() => {})
 
     return next(e)
   })
 
   // /clear and /resume carry on in this process under another session, with no session.start: what
-  // was drawn and the turn retry would judge belong to the one that ended.
+  // was drawn and the turn retry would judge belong to the one that ended. The new session's id
+  // arrives only after session.end, by the next draw, which takes up what that session kept.
   on('session.end', async ($, e, next) => {
     const ended = await next(e)
     if (e.reason !== 'clear' && e.reason !== 'resume') return ended
-    live.epoch += 1
-    live.activeBefore = false
-    live.lastTurn = null
+    forgetSession(live)
     await Promise.all([update($, verdict, () => null), update($, phase, (): Phase => 'idle')]).catch(() => {})
-    // Once the session taking its place has its id, draw what it kept.
-    $.clock.after(0, () => {
-      $.session.id()
-        .then(id => (id === e.sessionId ? undefined : restoreKept($, live, retry)))
-        .catch(() => {})
-    })
 
     return ended
   })
@@ -829,6 +855,15 @@ export const register: Register = (on, options) => {
 
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    // The session changed under this process (/clear, /resume): take it up after this draw, which
+    // can't write state itself.
+    const id = await $.session.id().catch(() => null)
+    if (id !== null && id !== live.sessionId) {
+      const first = live.sessionId === null
+      live.sessionId = id
+      if (!first) $.clock.after(0, () => { takeUpSession($, live, retry).catch(() => {}) })
+    }
+
     const p = await read($, phase)
     // A verdict kept from an earlier version of the plugin has another shape: ignore it.
     const kept = await read($, verdict)
@@ -879,7 +914,7 @@ export const register: Register = (on, options) => {
     return (
       <Box justifyContent="space-between">
         {rows}
-        <Button key="retry" label="↻ retry" hotkey="r" plain dimColor onPress={() => startJudging($, live, settings, toast, retry, again).catch(() => {})} />
+        <Button key="retry" label="↻ Retry" hotkey="r" plain dimColor onPress={() => startJudging($, live, settings, toast, retry, again).catch(() => {})} />
       </Box>
     )
   })

@@ -19,7 +19,7 @@ JEV task: ✔ done 95%
 JEV ship: ? needs review · Jev suggested production 35%
 ```
 
-On the right of the band, **r: ↻ retry** judges the last turn again: click it, or press `r` with
+On the right of the band, **r: ↻ Retry** judges the last turn again: click it, or press `r` with
 the band focused (never from the prompt). It reuses the same summary and runs a fresh
 session-context review where one is needed. It is there for working on the plugin and for a
 verdict that went wrong (a timeout, a Jev error), and it appears once a turn has been judged.
@@ -70,8 +70,14 @@ After all reviews, the plugin applies the gate to the ship answer:
 | production | complete | ▲ production |
 | production | incomplete | ◆ development · production gated: verification incomplete |
 | production | unknown, or not settled by a review | ? needs review · … but verification unknown / not settled |
-| production | (a check the plugin saw fail this turn) | ◆ development · production gated: observed tests failed |
+| production | disputed (see *Conflicts*) | ? needs review · … but Jev found verification incomplete 99% |
+| production | (a check the plugin saw fail this turn) | ? needs review · … but observed tests failed |
 | development / blocked / n/a | any | unchanged |
+
+Unfinished verification lowers the answer to `development`: the work is usable but not verified
+enough. A check seen failing is not the same thing: the plugin can't tell whether that failure
+blocks the work (it may be unrelated, or expected), so it asks for review rather than calling the
+work usable, and leaves `blocked` to an answer that says the work is blocked.
 
 So the session-context review can recover context from earlier turns, but it can't lift work to
 `production` on its own: verification has to be `complete` as well.
@@ -112,14 +118,24 @@ questions need it, one review answers them all. It may answer `unclear`. It is a
 that did the work, reviewing itself; its prompt asks it to judge verification as strictly as an
 outside reviewer would, and the verification gate above holds whatever it answers.
 
+**Conflicts.** Because the reviewing model is the one that did the work, it can't overrule what
+Jev confidently found against the work. When Jev, at or above the threshold, says verification is
+`incomplete` or ship is `blocked`, and the review answers anything less cautious, that question
+shows `? needs review` with both sides (`Claude suggested production, but Jev found it blocked
+95%`). A review that agrees, or is more cautious, is no conflict; an `incomplete` or `blocked` Jev
+was unsure of is the review's to settle.
+
 When no one can settle a question (with Claude's review turned on; a threshold of 0 opts out of
 reviews, delivery turns included, and Jev's answer then shows as given, even a low-confidence
 `production`):
 
 - **task** keeps Jev's low-confidence answer, shown with its percentage.
 - **ship** and **verification** fail closed: ship shows `? needs review` with what Jev suggested,
-  never a low-confidence green `production`; an unsettled verification counts as not complete. The same happens when the review fails or times out, and on the two kinds
-  of turn above (delivery, n/a after active work), whatever Jev's confidence was.
+  never a low-confidence green `production`; an unsettled verification counts as not complete. The
+  same happens when the review fails or times out. A ship or verification question that was sent
+  to the review and comes back unsettled never falls back to Jev's answer, whatever Jev's
+  confidence was: Jev saw only the latest turn, and the review was asked because that wasn't
+  enough.
 
 A Jev error (HTTP failure, invalid JSON, malformed answer) with no Claude answer shows as
 `Jev error (…)`.
@@ -131,7 +147,7 @@ The plugin watches the Bash commands the agent runs during the turn and records 
 `pytest`, `cargo build`, `tsc`, `eslint`). These are observations, kept apart from what the agent
 claims in its final message, and are sent to Jev and the summary review as such. If the plugin saw
 a check fail (its latest run in the turn) and the answer is `production`, the ship row shows
-`◆ development · production gated: observed tests failed` instead. A passing check alone never
+`? needs review · … but observed tests failed` instead. A passing check alone never
 makes verification `complete`.
 
 Limits, chosen so that an observation errs towards `unknown` rather than `passed`:
@@ -185,7 +201,7 @@ Without a key nothing goes to TypeSafe; Claude judges each turn instead (unless 
 |---|---|---|
 | TypeSafe API key | empty | see above |
 | Toast each verdict | on | also show each verdict as a toast |
-| Retry button | on | show **↻ retry** on the right of the band; off also keeps no turn excerpts on disk |
+| Retry button | on | show **↻ Retry** on the right of the band; off also keeps no turn excerpts on disk |
 | Ship check | on | also ask the ship and verification questions; off shows only the task row. Left unset, 0.6's *Deploy check* applies |
 | Ask Claude below (% Jev confidence) | 70 | below this, Claude gives a second opinion on that answer; used for both questions unless overridden below; 0 never asks (delivery turns included) |
 | Task threshold (%) | empty | overrides the above for the task question |

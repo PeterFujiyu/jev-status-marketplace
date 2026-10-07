@@ -588,6 +588,64 @@ test('verification still unknown after the review is never green production', { 
   for (const surface of SURFACES) expect(await bandText($, surface)).not.toContain('▲')
 })
 
+test('Claude cannot overrule Jev\'s confident incomplete verification', { options: KEY }, async ($, on) => {
+  // Jev: production, unsure, but verification incomplete, sure. The session model says all is done.
+  const { replies, forks, clock } = world(
+    on,
+    jevSays('done', 0.95, ['production', 0.35], ['incomplete', 0.99]),
+    'unused',
+    'ship: production\nverification: complete',
+  )
+  await runTurn($)
+  await clock.settle()
+  expect(forks.length).toBe(1)
+  await expectBand($, '? needs review · Claude suggested production, but Jev found verification incomplete 99%')
+  for (const surface of SURFACES) expect(await bandText($, surface)).not.toContain('▲')
+
+  // An incomplete Jev was unsure of is Claude's to settle.
+  replies.jev = jevSays('done', 0.95, ['production', 0.35], ['incomplete', 0.5])
+  await runTurn($)
+  await clock.settle()
+  await expectBand($, '▲ production · Claude, session context (Jev 35%)')
+
+  // Claude agreeing, or more cautious, is no conflict.
+  replies.jev = jevSays('done', 0.95, ['production', 0.35], ['incomplete', 0.99])
+  replies.session = 'ship: production\nverification: incomplete'
+  await runTurn($)
+  await clock.settle()
+  await expectBand($, '◆ development · Claude, session context (Jev 35%) · production gated: verification incomplete')
+})
+
+test('Claude cannot overrule Jev\'s confident blocked', { options: KEY }, async ($, on) => {
+  // A push this turn sends ship to the session model even though Jev is sure it is blocked.
+  const { forks, clock } = world(
+    on,
+    jevSays('done', 0.95, ['blocked', 0.95], ['complete', 0.95]),
+    'unused',
+    'ship: production\nverification: complete',
+  )
+  await runTurn($, { bash: ['git push FAIL'], answer: 'The push was rejected: protected branch.' })
+  await clock.settle()
+  expect(forks.length).toBe(1)
+  await expectBand($, '? needs review · Claude suggested production, but Jev found it blocked 95%')
+})
+
+test('verification sent to the session model and left unclear is never Jev\'s turn-local answer', { options: KEY }, async ($, on) => {
+  // Ship goes to the session model (Jev unsure), verification with it; Jev's sure "complete" only saw this turn.
+  const { forks, clock } = world(
+    on,
+    jevSays('done', 0.95, ['production', 0.35], ['complete', 0.99]),
+    'unused',
+    'ship: production\nverification: unclear',
+  )
+  await runTurn($)
+  await clock.settle()
+  expect(forks.length).toBe(1)
+  expect(forks[0]).toContain('verification: <choice>')
+  await expectBand($, '? needs review · Claude suggested production, but verification not settled')
+  for (const surface of SURFACES) expect(await bandText($, surface)).not.toContain('▲')
+})
+
 test('the gate only touches production', { options: KEY }, async ($, on) => {
   const { replies, clock } = world(on, jevSays('done', 0.95))
   const cases: [[string, number], [string, number], string][] = [
@@ -1050,13 +1108,14 @@ test('tool results that outlive their turn are not counted in the next', { optio
   expect(state.tool_errors).toEqual([])
 })
 
-test('a check seen failing lowers production to development', { options: KEY }, async ($, on) => {
+test('a check seen failing turns production into needs review, not development', { options: KEY }, async ($, on) => {
+  // Development means usable; a failure whose impact the plugin can't tell is not that.
   const { toasts, clock } = world(on, jevSays('done', 0.95, ['production', 0.95]))
   await runTurn($, { bash: ['npm test FAIL'], answer: 'Done; ready to ship.' })
   await clock.settle()
 
-  await expectBand($, '◆ development 95% · production gated: observed tests failed')
-  expect(toasts).toEqual(['done (95%) · ship: development (95%) · production gated: observed tests failed'])
+  await expectBand($, '? needs review · Jev suggested production 95%, but observed tests failed')
+  expect(toasts).toEqual(['done (95%) · ship: needs review (Jev suggested production 95%, but observed tests failed)'])
 })
 
 // ——— Options and state ———
@@ -1243,19 +1302,31 @@ test('a reload keeps the verdict in the session, not an older kept one', { optio
   await expectBand($, '◆ development 88%')
 })
 
-/** Ends the session in this process, as /clear or /resume does, which goes on as `next`. */
-async function switchSession($: Engine, session: { id: string }, reason: 'clear' | 'resume' | 'prompt_input_exit', next: string) {
+/**
+ * Ends the session in this process, as /clear or /resume does, which goes on as `next`. As in
+ * Claude Code, the id changes only after session.end and its timers, and the band then redraws.
+ */
+async function switchSession(
+  $: Engine,
+  session: { id: string },
+  clock: { settle: () => Promise<unknown> },
+  reason: 'clear' | 'resume' | 'prompt_input_exit',
+  next: string,
+) {
   const ending = session.id
   await $.session.end({ reason, sessionId: ending, resume: { id: ending } })
+  await clock.settle()
   session.id = next
+  await bandText($, 'terminal')
 }
 
 test('/clear forgets the band and the turn retry would judge', { options: KEY }, async ($, on) => {
   const { clock, session, sent } = world(on, jevSays('done', 0.95))
+  await $.session.start(START)
   await runTurn($)
   await clock.settle()
   await expectBand($, 'done 95%')
-  await switchSession($, session, 'clear', 'sess-2')
+  await switchSession($, session, clock, 'clear', 'sess-2')
   await clock.settle()
   await expectNoBand($)
   for (const surface of SURFACES) expect(await retryButton($, surface)).toBeUndefined()
@@ -1264,8 +1335,9 @@ test('/clear forgets the band and the turn retry would judge', { options: KEY },
 
 test('a verdict still being judged when /clear runs is dropped', { options: KEY }, async ($, on) => {
   const { clock, session, store } = world(on, jevSays('done', 0.95))
+  await $.session.start(START)
   await runTurn($)
-  await switchSession($, session, 'clear', 'sess-2')
+  await switchSession($, session, clock, 'clear', 'sess-2')
   await clock.settle()
   await expectNoBand($)
   expect(store.size).toBe(0)
@@ -1275,10 +1347,11 @@ test('/resume draws the resumed session\'s kept verdict', { options: KEY }, asyn
   const { clock, session, sent } = world(on, jevSays('done', 0.95, ['development', 0.88]), undefined, undefined, undefined, {
     'session:sess-2': keptAt(5),
   })
+  await $.session.start(START)
   await runTurn($)
   await clock.settle()
   await expectBand($, '◆ development 88%')
-  await switchSession($, session, 'resume', 'sess-2')
+  await switchSession($, session, clock, 'resume', 'sess-2')
   await clock.settle()
   await expectBand($, '▲ production 91%')
 
@@ -1293,9 +1366,24 @@ test('/resume never retries the turn of the session it left', { options: KEY }, 
   const { clock, session } = world(on, jevSays('done', 0.95), undefined, undefined, undefined, {
     'session:sess-2': { ...keptAt(5), turn: undefined },
   })
+  await $.session.start(START)
   await runTurn($)
   await clock.settle()
-  await switchSession($, session, 'resume', 'sess-2')
+  await switchSession($, session, clock, 'resume', 'sess-2')
+  await clock.settle()
+  await expectBand($, '▲ production 91%')
+  for (const surface of SURFACES) expect(await retryButton($, surface)).toBeUndefined()
+})
+
+test('a session change seen only by the band still leaves the old session behind', { options: KEY }, async ($, on) => {
+  const { clock, session } = world(on, jevSays('done', 0.95), undefined, undefined, undefined, {
+    'session:sess-2': { ...keptAt(5), turn: undefined },
+  })
+  await $.session.start(START)
+  await runTurn($)
+  await clock.settle()
+  session.id = 'sess-2'
+  await bandText($, 'terminal')
   await clock.settle()
   await expectBand($, '▲ production 91%')
   for (const surface of SURFACES) expect(await retryButton($, surface)).toBeUndefined()
@@ -1303,9 +1391,10 @@ test('/resume never retries the turn of the session it left', { options: KEY }, 
 
 test('leaving the session changes nothing', { options: KEY }, async ($, on) => {
   const { clock, session } = world(on, jevSays('done', 0.95))
+  await $.session.start(START)
   await runTurn($)
   await clock.settle()
-  await switchSession($, session, 'prompt_input_exit', 'sess-1')
+  await switchSession($, session, clock, 'prompt_input_exit', 'sess-1')
   await clock.settle()
   await expectBand($, 'done 95%')
   for (const surface of SURFACES) expect(await retryButton($, surface)).toBeDefined()

@@ -41,7 +41,8 @@ export type Answer<C extends string = string> = {
   suggested?: { choice: string; by: 'jev' | 'claude'; confidence?: number }
   /**
    * Why the answer is not what was suggested: for `review`, why it was not trusted, when not low
-   * confidence; for a ship answer the verification gate lowered, why (`production gated: …`).
+   * confidence (a check seen failing, verification unsettled, or Jev's confident finding against
+   * Claude's answer); for a ship answer the verification gate lowered, why (`production gated: …`).
    */
   note?: string
 }
