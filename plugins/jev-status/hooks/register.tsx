@@ -654,10 +654,17 @@ async function restoreKept($: EngineInterface, live: Live, retry: boolean) {
   }
 }
 
-/** Forgets what belonged to the session that ended (/clear, /resume), then takes up what the new one kept. */
-async function takeUpSession($: EngineInterface, live: Live, retry: boolean) {
+/**
+ * Forgets what belonged to the session that ended (/clear, /resume), then takes up what the new one
+ * kept; `id` and `since` are the session and epoch it was scheduled at. A turn started since (or
+ * another switch) owns what is drawn by then, so it does nothing.
+ */
+async function takeUpSession($: EngineInterface, live: Live, retry: boolean, id: string, since: number) {
+  if (live.epoch !== since || live.sessionId !== id) return
   forgetSession(live)
+  const mine = live.epoch
   await Promise.all([update($, verdict, () => null), update($, phase, (): Phase => 'idle')])
+  if (live.epoch !== mine || live.sessionId !== id) return
   await restoreKept($, live, retry)
 }
 
@@ -861,7 +868,8 @@ export const register: Register = (on, options) => {
     if (id !== null && id !== live.sessionId) {
       const first = live.sessionId === null
       live.sessionId = id
-      if (!first) $.clock.after(0, () => { takeUpSession($, live, retry).catch(() => {}) })
+      const since = live.epoch
+      if (!first) $.clock.after(0, () => { takeUpSession($, live, retry, id, since).catch(() => {}) })
     }
 
     const p = await read($, phase)

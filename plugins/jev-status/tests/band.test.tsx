@@ -1389,6 +1389,24 @@ test('a session change seen only by the band still leaves the old session behind
   for (const surface of SURFACES) expect(await retryButton($, surface)).toBeUndefined()
 })
 
+test('a turn that starts before the switch is taken up keeps its verdict', { options: KEY }, async ($, on) => {
+  const { clock, session } = world(on, jevSays('done', 0.95), undefined, undefined, undefined, {
+    'session:sess-2': keptAt(5, 'blocked'),
+  })
+  await $.session.start(START)
+  await runTurn($)
+  await clock.settle()
+  await $.session.end({ reason: 'resume', sessionId: 'sess-1', resume: { id: 'sess-1' } })
+  await clock.settle()
+  session.id = 'sess-2'
+  // The band sees the switch and queues taking it up; a new turn ends before that runs.
+  await bandText($, 'terminal')
+  await runTurn($, { prompt: 'next', answer: 'Done.' })
+  await clock.settle()
+  await expectBand($, '✔ done 95%', '▲ production 90%')
+  for (const surface of SURFACES) expect(await bandText($, surface)).not.toContain('blocked')
+})
+
 test('leaving the session changes nothing', { options: KEY }, async ($, on) => {
   const { clock, session } = world(on, jevSays('done', 0.95))
   await $.session.start(START)
