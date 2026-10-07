@@ -1,14 +1,15 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallInput, ToolCallResult } from 'claude-code'
 
-import type { Answer, Check, Deploy, Observed, Phase, Question, Status, Verdict } from '../types'
+import type { Answer, Check, Observed, Phase, Question, Ship, Status, Verdict } from '../types'
 
 // After each turn, asks TypeSafe Jev two independent things: where the user's
-// task stands (done, waiting on the user, failed), and how ready the turn's
-// deployable work is (production, development only, not deployable, nothing to
-// deploy). Draws both above the prompt. When Jev is unsure of either (or can't
-// answer), asks Claude for a second opinion on that one. A deploy answer no one
-// could settle shows as "needs review", never as a low-confidence green.
+// task stands (done, waiting on the user, failed), and the highest safe delivery
+// level of the session's current active work, which may come from earlier turns
+// (production, development, blocked, n/a). Draws both above the prompt. When Jev
+// is unsure of either (or can't answer), asks Claude for a second opinion on that
+// one; for ship, the session's own model reviews the session context. A ship
+// answer no one could settle shows as "needs review", never as a low-confidence green.
 // Sent to TypeSafe per turn: excerpts of the user's prompt and Claude's final
 // answer, the last few tool errors and their count, and pass/fail states of
 // checks the plugin saw run. Nothing else.
@@ -26,7 +27,7 @@ const MAX_ERRORS = 3
 const MAX_ERROR_CHARS = 300
 const DEFAULT_BELOW = 70
 
-type Choices = { status: Status; deploy: Deploy }
+type Choices = { status: Status; ship: Ship }
 
 const CRITERIA: { [Q in Question]: Record<Choices[Q], string> } = {
   status: {
@@ -40,41 +41,46 @@ const CRITERIA: { [Q in Question]: Record<Choices[Q], string> } = {
       'The agent could not complete the task: it hit errors it did not resolve, gave up, ' +
       'or reports that the result does not work.',
   },
-  deploy: {
+  ship: {
     production:
-      'Deployable work (code, configuration, infrastructure) was produced and the verification relevant ' +
-      'to it (such as tests or a build) was reported or observed passing, with no known blockers or ' +
-      'unresolved risks. Errors fixed later in the turn are not blockers. This holds even if the agent ' +
-      "still waits for the user's go-ahead to deploy.",
+      'Deliverable work (code, configuration, infrastructure) is active in the session and the ' +
+      'verification relevant to it (such as tests or a build) was reported or observed passing, with no ' +
+      'known blockers or unresolved risks. Errors fixed later are not blockers. This holds even if the ' +
+      "agent still waits for the user's go-ahead to push, merge or deploy; it is the highest level.",
     development:
-      'Deployable work was produced and appears usable, but it was not verified (tests not run or only ' +
-      'partly, untested paths, open follow-ups the agent mentions); suitable for development or staging, ' +
-      'not production.',
-    nodeploy:
-      'Deployable work exists but must not be deployed: a known blocker or failure, an unfinished ' +
-      'implementation, a risky or unsafe condition (data migrations, destructive or irreversible steps, ' +
-      'security- or credential-sensitive changes), or an explicit warning not to ship it.',
-    nothing:
-      'No environment-deployable work was produced: research, an explanation, planning, a code review, ' +
-      'a greeting or other conversation.',
+      'Deliverable work is active and appears usable, but it was not verified (tests not run or only ' +
+      'partly, untested paths, open follow-ups the agent mentions); safe to push or merge for development ' +
+      'or staging, not production.',
+    blocked:
+      'The current active work should not be pushed, merged or deployed yet: a known failure, unfinished ' +
+      'work, an unresolved risk (data migrations, destructive or irreversible steps, security- or ' +
+      'credential-sensitive changes), or a required fix or review.',
+    na:
+      'There is genuinely no active deliverable work in the session: only questions, research, ' +
+      'explanation, planning or conversation. A turn with no new edits is not na when it pushes, merges, ' +
+      'releases, approves or otherwise continues work from earlier turns.',
   },
 }
 
 const ASKS: Record<Question, string> = {
-  status: "Where does the user's task stand now? Judge only the task, not deployment.",
-  deploy:
-    "How ready is this turn's deployable work, and for which environment? Judge only technical " +
-    'readiness, not whether the agent waits on the user. Production readiness does not replace CI, ' +
+  status: "Where does the user's task stand now? Judge only the task, not delivery.",
+  ship:
+    'What is the highest safe delivery level for the current active work represented by this session? ' +
+    'Earlier turns of the session count: work created or verified before this turn is still active when ' +
+    'this turn pushes, merges, releases, approves or otherwise continues it. Unknown checks are no evidence ' +
+    'either way. Judge only technical ' +
+    'readiness, not whether the agent waits on the user; production readiness does not replace CI, ' +
     'review, approvals or release policy.',
 }
 
 const STATE =
-  '`state` is the end of one turn of an AI coding agent. `user_request` is what the user asked and ' +
+  "`state` is the latest turn of an AI coding agent's session; earlier turns are not included. " +
+  '`user_request` is what the user asked and ' +
   "`agent_final_message` is the agent's last message before it stopped; long text is shortened in " +
   'the middle. `tool_errors` are the last few errors from tools the agent ran during the turn and ' +
   '`tool_error_count` how many there were in all; the agent may have resolved them later in the same ' +
   'turn, so weigh them against the final message. `observed_checks` are results the plugin itself saw ' +
-  'from commands the agent ran this turn (unknown: none seen, or the outcome could not be told; unknown ' +
+  'from commands the agent ran in this latest turn only (unknown: none seen, or the outcome could not be told; unknown ' +
   "is no evidence either way, and not every project has every check); unlike the agent's message, they " +
   'are not claims. '
 
@@ -91,11 +97,17 @@ const replyForm = (qs: Question[]) =>
   `${qs.map(q => `"${q}: <choice>"`).join(', ')}.`
 
 const reviewSystem = (qs: Question[]) =>
-  `You judge the end of one turn of an AI coding agent. ${STATE}${replyForm(qs)}\n\n${rubric(qs)}`
+  `You judge the latest turn of an AI coding agent's session. ${STATE}${replyForm(qs)}\n\n${rubric(qs)}`
+
+const SHIP_REVIEW =
+  'On the ship question: Review the current session context and judge the latest active deliverable work, not ' +
+  'just the most recent turn. Work created or verified in earlier turns still counts if the current ' +
+  'turn is pushing, merging, releasing, approving, or otherwise continuing that work. Use na only when ' +
+  'there is genuinely no active deliverable work in the session. '
 
 const forkPrompt = (qs: Question[]) =>
   "Step outside the conversation for a moment and judge the user's task as of your last message. " +
-  `${replyForm(qs)}\n\n${rubric(qs)}`
+  `${qs.includes('ship') ? SHIP_REVIEW : ''}${replyForm(qs)}\n\n${rubric(qs)}`
 
 // `label` is drawn in color above the prompt; `words` is the plain text for a
 // toast, which shows no color and already carries the plugin's name.
@@ -104,7 +116,7 @@ type Look = { color?: string; label: string; words: string }
 const NO_KEY: Look = { label: 'no TypeSafe API key (set it in /plugin)', words: 'no TypeSafe API key' }
 const JEV_ERROR: Look = { label: 'Jev error', words: 'Jev error' }
 
-const LOOK: { status: Record<Status | 'nokey' | 'error', Look>; deploy: Record<Deploy | 'review' | 'nokey' | 'error', Look> } = {
+const LOOK: { status: Record<Status | 'nokey' | 'error', Look>; ship: Record<Ship | 'review' | 'nokey' | 'error', Look> } = {
   status: {
     done: { color: 'green', label: '✔ done', words: 'done' },
     needaction: { color: 'yellow', label: '● needs action', words: 'needs action' },
@@ -112,11 +124,11 @@ const LOOK: { status: Record<Status | 'nokey' | 'error', Look>; deploy: Record<D
     nokey: NO_KEY,
     error: JEV_ERROR,
   },
-  deploy: {
+  ship: {
     production: { color: 'green', label: '▲ production', words: 'production' },
-    development: { color: 'cyan', label: '◆ development only', words: 'dev only' },
-    nodeploy: { color: 'red', label: '■ not deployable', words: 'not deployable' },
-    nothing: { label: '– nothing to deploy', words: 'nothing' },
+    development: { color: 'cyan', label: '◆ development', words: 'development' },
+    blocked: { color: 'red', label: '■ blocked', words: 'blocked' },
+    na: { label: '– n/a', words: 'n/a' },
     review: { color: 'yellow', label: '? needs review', words: 'needs review' },
     nokey: NO_KEY,
     error: JEV_ERROR,
@@ -124,7 +136,7 @@ const LOOK: { status: Record<Status | 'nokey' | 'error', Look>; deploy: Record<D
 }
 
 // Reviewer spellings of a choice, compared with spaces, hyphens and underscores removed.
-const ALIASES: Record<string, string> = { needsaction: 'needaction', nothingtodeploy: 'nothing' }
+const ALIASES: Record<string, string> = { needsaction: 'needaction', 'n/a': 'na', notapplicable: 'na' }
 
 // ——— Observed checks ———
 // The plugin sees each Bash command and whether it ended in an error (a
@@ -173,8 +185,8 @@ const verifies = (line: string) =>
   !/^(vitest|jest) (list|watch)\b/.test(line) &&
   !/^make (.* )?-n( |$)/.test(line)
 
-/** Which check one simple command runs, if any, and whether it really verifies. */
-function checkOf(command: string): { check: Check; verifies: boolean } | undefined {
+/** One simple command as `tool args`, with assignments and launchers (npx, uv run, …) dropped. */
+function normalize(command: string): string | undefined {
   let words = command.split(/\s+/).filter(Boolean)
   // Variable assignments, and launchers that only start the real tool.
   for (;;) {
@@ -184,10 +196,25 @@ function checkOf(command: string): { check: Check; verifies: boolean } | undefin
     else if (words.length > 2 && runs2) words = words.slice(2)
     else break
   }
-  if (words.length === 0) return undefined
-  const line = [base(words[0]!), ...words.slice(1)].join(' ')
+  return words.length === 0 ? undefined : [base(words[0]!), ...words.slice(1)].join(' ')
+}
+
+/** Which check one simple command runs, if any, and whether it really verifies. */
+function checkOf(command: string): { check: Check; verifies: boolean } | undefined {
+  const line = normalize(command)
+  if (line === undefined) return undefined
   const check = RULES.find(([, re]) => re.test(line))?.[0]
   return check === undefined ? undefined : { check, verifies: verifies(line) }
+}
+
+// Commands that deliver work: pushing, merging, publishing, releasing, deploying.
+const DELIVERY =
+  /^(git (push|merge)|gh (pr merge|release create)|(npm|pnpm|yarn|cargo|gem|twine) (publish|upload)|docker push|kubectl (apply|rollout)|terraform apply|helm (upgrade|install)|(fly|vercel|netlify|firebase|serverless|sls|wrangler) deploy)\b/
+
+/** Whether a Bash command delivers work in any of its parts, whatever its outcome. */
+function delivers(command: string): boolean {
+  const flat = command.replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, 'Q').replace(/\d*>&\d*|&>|<&\d*/g, ' ')
+  return flat.split(/&&|\|\||[|;&\n]/).some(part => DELIVERY.test(normalize(part.trim()) ?? ''))
 }
 
 /** How a Bash call ended: exit 0, an error exit, or an end that says nothing (interrupted, backgrounded). */
@@ -220,7 +247,7 @@ function observe(command: string, outcome: Outcome): [Check, Observed][] {
 // ——— Judging ———
 
 type Checks = Record<Check, Observed>
-type Turn = { prompt: string; answer: string; errors: string[]; errorCount: number; checks: Checks }
+type Turn = { prompt: string; answer: string; errors: string[]; errorCount: number; checks: Checks; delivered: boolean }
 
 type ClaudeView = 'summary' | 'summary-then-conversation' | 'conversation'
 
@@ -228,7 +255,7 @@ type Settings = {
   apiKey: unknown
   questions: Question[]
   taskBelow: number
-  deployBelow: number
+  shipBelow: number
   productionBelow: number
   claudeView: ClaudeView
   reviewModel: string
@@ -387,19 +414,24 @@ async function reviewConversation($: EngineInterface, qs: Question[]): Promise<P
   return reply?.isAnswered ? readReply(qs, reply.text) : {}
 }
 
-/** Claude's answers to `qs` and which view gave each; questions it could not tell are left out. */
+/**
+ * Claude's answers to `qs` and which view gave each; questions it could not tell
+ * are left out. The task question goes through `claude_view`; ship is about the
+ * session's active work, which only the session context shows, so it goes there.
+ */
 async function askClaude($: EngineInterface, s: Settings, turn: Turn, qs: Question[]) {
   const picked: Partial<Record<Question, { choice: string; via: 'summary' | 'conversation' }>> = {}
-  let left = qs
-  if (s.claudeView !== 'conversation') {
-    const summary = await reviewSummary($, s, turn, left).catch((): Picks => ({}))
-    for (const q of left) if (summary[q] !== undefined) picked[q] = { choice: summary[q]!, via: 'summary' }
-    left = left.filter(q => picked[q] === undefined)
-    if (s.claudeView === 'summary' || left.length === 0) return picked
+  let task = qs.filter(q => q !== 'ship')
+  if (task.length > 0 && s.claudeView !== 'conversation') {
+    const summary = await reviewSummary($, s, turn, task).catch((): Picks => ({}))
+    for (const q of task) if (summary[q] !== undefined) picked[q] = { choice: summary[q]!, via: 'summary' }
+    // The summary was not enough (unless the person wants the summary alone).
+    task = s.claudeView === 'summary' ? [] : task.filter(q => picked[q] === undefined)
   }
-  // The summary was not enough (or the person always wants the session context).
-  const whole = await reviewConversation($, left).catch((): Picks => ({}))
-  for (const q of left) if (whole[q] !== undefined) picked[q] = { choice: whole[q]!, via: 'conversation' }
+  const forked = [...task, ...qs.filter(q => q === 'ship')]
+  if (forked.length === 0) return picked
+  const whole = await reviewConversation($, forked).catch((): Picks => ({}))
+  for (const q of forked) if (whole[q] !== undefined) picked[q] = { choice: whole[q]!, via: 'conversation' }
   return picked
 }
 
@@ -409,10 +441,14 @@ async function judge($: EngineInterface, s: Settings, turn: Turn): Promise<Verdi
   const jev = key ? await askJev($, key, turn, qs) : allAre(qs, { choice: 'nokey', source: 'jev' })
 
   const below = (q: Question, a: Answer) =>
-    q === 'status' ? s.taskBelow : a.choice === 'production' ? Math.max(s.deployBelow, s.productionBelow) : s.deployBelow
+    q === 'status' ? s.taskBelow : a.choice === 'production' ? Math.max(s.shipBelow, s.productionBelow) : s.shipBelow
   const unsure = (q: Question, a: Answer) =>
     !failedAnswer(a) && typeof a.confidence === 'number' && a.confidence * 100 < below(q, a)
-  const toClaude = qs.filter(q => unsure(q, jev[q]!) || (failedAnswer(jev[q]!) && s.claudeOnJevFailure))
+  // A turn that pushes, merges or deploys delivers work from earlier turns Jev can't see: review ship from the session context.
+  const delivery = (q: Question, a: Answer) => q === 'ship' && turn.delivered && !failedAnswer(a) && s.shipBelow > 0
+  const toClaude = qs.filter(
+    q => unsure(q, jev[q]!) || delivery(q, jev[q]!) || (failedAnswer(jev[q]!) && s.claudeOnJevFailure),
+  )
   const claude = toClaude.length > 0 ? await askClaude($, s, turn, toClaude) : {}
 
   const answers: Answers = {}
@@ -424,22 +460,22 @@ async function judge($: EngineInterface, s: Settings, turn: Turn): Promise<Verdi
         choice: c.choice,
         source: 'claude',
         via: c.via,
-        confidence: unsure(q, j) ? j.confidence : undefined,
+        confidence: failedAnswer(j) ? undefined : j.confidence,
         error: failedAnswer(j) ? (j.choice === 'nokey' ? 'no Jev key' : `Jev ${j.error ?? 'error'}`) : undefined,
       }
-    } else if (q === 'deploy' && unsure(q, j)) {
-      // Fail closed: an unsure deploy answer Claude could not settle is not shown as Jev's.
+    } else if (q === 'ship' && unsure(q, j)) {
+      // Fail closed: an unsure ship answer Claude could not settle is not shown as Jev's.
       answers[q] = { choice: 'review', source: 'jev', suggested: { choice: j.choice, by: 'jev', confidence: j.confidence } }
     } else {
-      answers[q] = j // the task row keeps Jev's answer; a failed deploy row stays an error
+      answers[q] = j // the task row keeps Jev's answer; a failed ship row stays an error
     }
   }
 
   // Production cannot stand against a check the plugin saw fail.
-  const d = answers.deploy
+  const d = answers.ship
   const broken = CHECKS.filter(c => turn.checks[c] === 'failed')
   if (d?.choice === 'production' && broken.length > 0) {
-    answers.deploy = {
+    answers.ship = {
       choice: 'review',
       source: d.source,
       suggested: { choice: 'production', by: d.source, confidence: d.source === 'jev' ? d.confidence : undefined },
@@ -464,13 +500,14 @@ function numberOption(v: unknown): number | undefined {
 
 export const register: Register = (on, options) => {
   const below = numberOption(options.claude_below) ?? DEFAULT_BELOW
-  const deployBelow = numberOption(options.deploy_below) ?? below
+  // ship_below replaced 0.6's deploy_below; a value kept under the old name still applies.
+  const shipBelow = numberOption(options.ship_below) ?? numberOption(options.deploy_below) ?? below
   const settings: Settings = {
     apiKey: options.api_key,
-    questions: options.deploy_check === false ? ['status'] : ['status', 'deploy'],
+    questions: options.ship_check === false ? ['status'] : ['status', 'ship'],
     taskBelow: numberOption(options.task_below) ?? below,
-    deployBelow,
-    productionBelow: numberOption(options.production_below) ?? deployBelow,
+    shipBelow,
+    productionBelow: numberOption(options.production_below) ?? shipBelow,
     claudeView: VIEWS.find(v => v === options.claude_view) ?? 'summary-then-conversation',
     reviewModel:
       typeof options.review_model === 'string' && options.review_model.trim() ? options.review_model.trim() : 'haiku',
@@ -481,6 +518,7 @@ export const register: Register = (on, options) => {
   let errors: string[] = []
   let errorCount = 0
   let checks = unknownChecks()
+  let delivered = false
   // Bumped by every new turn and every judgement started: an older one can't settle.
   let epoch = 0
   // Bumped by every new turn only: tool results are kept for the turn they started in.
@@ -496,6 +534,7 @@ export const register: Register = (on, options) => {
     errors = []
     errorCount = 0
     checks = unknownChecks()
+    delivered = false
     // Bookkeeping only: a failure here must never hold up the prompt.
     await Promise.all([update($, verdict, () => null), update($, phase, (): Phase => 'running')]).catch(() => {})
 
@@ -539,6 +578,7 @@ export const register: Register = (on, options) => {
         (ran.isError === true && /interrupt|timed out|background/i.test(ran.text ?? ''))
       const outcome: Outcome = unclear ? 'unclear' : ran.isError === true ? 'failed' : 'ok'
       for (const [c, o] of observe(e.command, outcome)) checks[c] = o
+      if (delivers(e.command)) delivered = true
     }
   }
 
@@ -554,7 +594,7 @@ export const register: Register = (on, options) => {
     }
 
     const mine = ++epoch
-    const turn: Turn = { prompt, answer: clip(e.answer, MAX_ANSWER_CHARS), errors, errorCount, checks: { ...checks } }
+    const turn: Turn = { prompt, answer: clip(e.answer, MAX_ANSWER_CHARS), errors, errorCount, checks: { ...checks }, delivered }
     await update($, phase, (): Phase => 'checking')
 
     let settled = false
@@ -565,8 +605,8 @@ export const register: Register = (on, options) => {
       await update($, verdict, () => v)
       await update($, phase, (): Phase => 'idle')
       if (options.toast !== false && v.status.choice !== 'nokey') {
-        const deploy = v.deploy ? ` · deploy: ${said(LOOK.deploy[v.deploy.choice], v.deploy)}` : ''
-        $.ui.toast(`${said(LOOK.status[v.status.choice], v.status)}${deploy}`)
+        const ship = v.ship ? ` · ship: ${said(LOOK.ship[v.ship.choice], v.ship)}` : ''
+        $.ui.toast(`${said(LOOK.status[v.status.choice], v.status)}${ship}`)
       }
     }
 
@@ -618,17 +658,17 @@ export const register: Register = (on, options) => {
         </Box>
       )
     }
-    const { status, deploy } = v
-    // Without a key, or when Jev failed for both, the deploy row would only repeat the status row.
-    const showDeploy =
-      deploy !== undefined &&
-      deploy.choice !== 'nokey' &&
-      !(deploy.choice === 'error' && status.choice === 'error' && deploy.error === status.error)
+    const { status, ship } = v
+    // Without a key, or when Jev failed for both, the ship row would only repeat the status row.
+    const showShip =
+      ship !== undefined &&
+      ship.choice !== 'nokey' &&
+      !(ship.choice === 'error' && status.choice === 'error' && ship.error === status.error)
 
     return (
       <Box flexDirection="column">
-        {row(showDeploy ? 'JEV task:   ' : 'JEV: ', LOOK.status, status)}
-        {showDeploy ? row('JEV deploy: ', LOOK.deploy, deploy) : null}
+        {row(showShip ? 'JEV task: ' : 'JEV: ', LOOK.status, status)}
+        {showShip ? row('JEV ship: ', LOOK.ship, ship) : null}
       </Box>
     )
   })

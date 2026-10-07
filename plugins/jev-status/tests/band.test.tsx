@@ -24,12 +24,12 @@ type State = {
   observed_checks: Record<string, string>
 }
 
-const jevSays = (status: string, confidence: number, deploy: [string, number] = ['production', 0.9]): JevReply => ({
+const jevSays = (status: string, confidence: number, ship: [string, number] = ['production', 0.9]): JevReply => ({
   status: 200,
   body: {
     answers: {
       status: { type: 'choice', choice: status, confidence },
-      deploy: { type: 'choice', choice: deploy[0], confidence: deploy[1] },
+      ship: { type: 'choice', choice: ship[0], confidence: ship[1] },
     },
   },
 })
@@ -49,7 +49,7 @@ type Replies = {
 function world(
   on: On,
   jev: Replies['jev'],
-  claude = 'status: failed\ndeploy: nodeploy',
+  claude = 'status: failed\nship: blocked',
   session = claude,
   env: Record<string, string> = { HOME: '/h' },
 ) {
@@ -164,7 +164,7 @@ const NO_FALLBACK = { api_key: 'k-test', claude_on_jev_failure: false }
 // ——— Jev alone ———
 
 test('a confident Jev answers both questions alone', { options: KEY }, async ($, on) => {
-  const { sent, body, completes, forks, toasts, clock } = world(on, jevSays('needaction', 0.9, ['nodeploy', 0.95]))
+  const { sent, body, completes, forks, toasts, clock } = world(on, jevSays('needaction', 0.9, ['blocked', 0.95]))
   await runTurn($)
 
   await expectBand($, 'checking')
@@ -181,42 +181,44 @@ test('a confident Jev answers both questions alone', { options: KEY }, async ($,
     tool_error_count: 0,
     observed_checks: { tests: 'unknown', build: 'unknown', typecheck: 'unknown', lint: 'unknown' },
   })
-  expect(Object.keys(b.questions)).toEqual(['status', 'deploy'])
+  expect(Object.keys(b.questions)).toEqual(['status', 'ship'])
   expect(Object.keys(b.questions.status.criteria)).toEqual(['done', 'needaction', 'failed'])
-  expect(Object.keys(b.questions.deploy.criteria)).toEqual(['production', 'development', 'nodeploy', 'nothing'])
+  expect(Object.keys(b.questions.ship.criteria)).toEqual(['production', 'development', 'blocked', 'na'])
   expect(b.questions.status.instructions).toContain('may have resolved them later')
-  expect(b.questions.deploy.instructions).toContain('not whether the agent waits on the user')
+  expect(b.questions.ship.instructions).toContain('not whether the agent waits on the user')
+  expect(b.questions.ship.instructions).toContain('current active work represented by this session')
+  expect(b.questions.ship.instructions).toContain('work created or verified before this turn is still active')
 
   expect(completes.length + forks.length).toBe(0)
-  await expectBand($, 'JEV task:', 'needs action 90%', 'JEV deploy:', 'not deployable 95%')
-  expect(toasts).toEqual(['needs action (90%) · deploy: not deployable (95%)'])
+  await expectBand($, 'JEV task:', 'needs action 90%', 'JEV ship:', 'blocked 95%')
+  expect(toasts).toEqual(['needs action (90%) · ship: blocked (95%)'])
 })
 
-test('a greeting is needaction with nothing to deploy', { options: KEY }, async ($, on) => {
-  const { toasts, clock } = world(on, jevSays('needaction', 0.97, ['nothing', 0.96]))
+test('a greeting is needaction with n/a', { options: KEY }, async ($, on) => {
+  const { toasts, clock } = world(on, jevSays('needaction', 0.97, ['na', 0.96]))
   await runTurn($, { prompt: 'Hi', answer: 'Hi! What can I help you with?' })
   await clock.settle()
 
-  await expectBand($, '● needs action 97%', '– nothing to deploy 96%')
-  expect(toasts).toEqual(['needs action (97%) · deploy: nothing (96%)'])
+  await expectBand($, '● needs action 97%', '– n/a 96%')
+  expect(toasts).toEqual(['needs action (97%) · ship: n/a (96%)'])
 })
 
-test('task and deploy combine freely', { options: KEY }, async ($, on) => {
+test('task and ship combine freely', { options: KEY }, async ($, on) => {
   const { replies, clock } = world(on, jevSays('done', 0.9))
   const combos: [string, string, string, string][] = [
     ['done', 'production', '✔ done 90%', '▲ production 90%'],
-    ['done', 'development', '✔ done 90%', '◆ development only 90%'],
-    ['done', 'nothing', '✔ done 90%', '– nothing to deploy 90%'],
+    ['done', 'development', '✔ done 90%', '◆ development 90%'],
+    ['done', 'na', '✔ done 90%', '– n/a 90%'],
     ['needaction', 'production', '● needs action 90%', '▲ production 90%'], // ready, waiting for a go-ahead
-    ['needaction', 'nothing', '● needs action 90%', '– nothing to deploy 90%'],
-    ['failed', 'nodeploy', '✘ failed 90%', '■ not deployable 90%'],
-    ['done', 'nodeploy', '✔ done 90%', '■ not deployable 90%'], // finished, but a risky migration
+    ['needaction', 'na', '● needs action 90%', '– n/a 90%'],
+    ['failed', 'blocked', '✘ failed 90%', '■ blocked 90%'],
+    ['done', 'blocked', '✔ done 90%', '■ blocked 90%'], // finished, but a risky migration
   ]
-  for (const [task, deploy, taskText, deployText] of combos) {
-    replies.jev = jevSays(task, 0.9, [deploy, 0.9])
+  for (const [task, ship, taskText, shipText] of combos) {
+    replies.jev = jevSays(task, 0.9, [ship, 0.9])
     await runTurn($)
     await clock.settle()
-    await expectBand($, taskText, deployText)
+    await expectBand($, taskText, shipText)
   }
 })
 
@@ -235,35 +237,32 @@ test('an unsure task goes to Claude with the default model, alone', { options: K
   expect(JSON.parse(completes[0]!.prompt).observed_checks.tests).toBe('unknown')
 
   await expectBand($, 'needs action · Claude (Jev 55%)', 'production 90%')
-  expect(toasts).toEqual(['needs action · Claude (Jev 55%) · deploy: production (90%)'])
+  expect(toasts).toEqual(['needs action · Claude (Jev 55%) · ship: production (90%)'])
 })
 
-test('an unsure deploy answer goes to Claude alone', { options: KEY }, async ($, on) => {
-  const { completes, clock } = world(on, jevSays('done', 0.95, ['production', 0.33]), 'deploy: development')
+test('an unsure ship answer goes straight to the session context', { options: KEY }, async ($, on) => {
+  const { completes, forks, toasts, clock } = world(on, jevSays('done', 0.95, ['production', 0.33]), 'unused', 'ship: development')
   await runTurn($)
   await clock.settle()
 
-  expect(completes.length).toBe(1)
-  expect(completes[0]!.system).toContain('deploy: <choice>')
-  expect(completes[0]!.system).not.toContain('needaction')
-  await expectBand($, 'done 95%', 'development only · Claude (Jev 33%)')
-})
-
-test("a deploy answer no review can settle needs review, not Jev's guess", { options: KEY }, async ($, on) => {
-  const { completes, forks, toasts, clock } = world(
-    on,
-    jevSays('done', 0.95, ['production', 0.35]),
-    'deploy: unclear',
-    'deploy: unclear',
-  )
-  await runTurn($)
-  await clock.settle()
-
-  expect(completes.length).toBe(1)
+  expect(completes.length).toBe(0)
   expect(forks.length).toBe(1)
-  await expectBand($, 'JEV deploy: ', '? needs review', ' · Jev suggested production 35%')
+  expect(forks[0]).toContain('ship: <choice>')
+  expect(forks[0]).not.toContain('needaction')
+  await expectBand($, 'done 95%', 'development · Claude, session context (Jev 33%)')
+  expect(toasts).toEqual(['done (95%) · ship: development · Claude, session context (Jev 33%)'])
+})
+
+test("a ship answer the session context can't settle needs review, not Jev's guess", { options: KEY }, async ($, on) => {
+  const { completes, forks, toasts, clock } = world(on, jevSays('done', 0.95, ['production', 0.35]), 'unused', 'ship: unclear')
+  await runTurn($)
+  await clock.settle()
+
+  expect(completes.length).toBe(0)
+  expect(forks.length).toBe(1)
+  await expectBand($, 'JEV ship: ', '? needs review', ' · Jev suggested production 35%')
   for (const surface of SURFACES) expect(await bandText($, surface)).not.toContain('▲')
-  expect(toasts).toEqual(['done (95%) · deploy: needs review (Jev suggested production 35%)'])
+  expect(toasts).toEqual(['done (95%) · ship: needs review (Jev suggested production 35%)'])
 })
 
 test('a deploy review that fails or hangs also needs review', { options: KEY }, async ($, on) => {
@@ -288,7 +287,7 @@ test("an unsettled task keeps Jev's low-confidence answer", { options: KEY }, as
 
   expect(completes.length).toBe(1)
   expect(forks.length).toBe(1)
-  await expectBand($, 'JEV task:   ✔ done 50%')
+  await expectBand($, 'JEV task: ✔ done 50%')
 })
 
 test('both reviews may answer unclear', { options: KEY }, async ($, on) => {
@@ -322,60 +321,160 @@ test('when the summary is not enough, the session context is read', { options: K
   expect(completes.length).toBe(1)
   expect(forks.length).toBe(1)
   await expectBand($, 'failed · Claude, session context (Jev 55%)')
-  expect(toasts).toEqual(['failed · Claude, session context (Jev 55%) · deploy: production (90%)'])
+  expect(toasts).toEqual(['failed · Claude, session context (Jev 55%) · ship: production (90%)'])
 })
 
 test('only the questions the summary could not answer go to the session context', { options: KEY }, async ($, on) => {
   const { forks, clock } = world(
     on,
     jevSays('done', 0.5, ['production', 0.3]),
-    'status: done\ndeploy: unclear',
-    'deploy: nodeploy',
+    'status: done\nship: unclear',
+    'ship: blocked',
   )
   await runTurn($)
   await clock.settle()
 
   expect(forks.length).toBe(1)
-  expect(forks[0]).toContain('deploy: <choice>')
+  expect(forks[0]).toContain('ship: <choice>')
   expect(forks[0]).not.toContain('needaction')
-  await expectBand($, 'done · Claude (Jev 50%)', 'not deployable · Claude, session context (Jev 30%)')
+  await expectBand($, 'done · Claude (Jev 50%)', 'blocked · Claude, session context (Jev 30%)')
 })
 
 test(
-  'the summary-only view does not go on to the session context',
+  'the summary-only view keeps the task on the summary; ship still reads the session context',
   { options: { ...KEY, claude_view: 'summary' } },
   async ($, on) => {
-    const { completes, forks, clock } = world(
-      on,
-      jevSays('done', 0.55, ['production', 0.5]),
-      'status: unclear\ndeploy: unclear',
-    )
+    const { completes, forks, clock } = world(on, jevSays('done', 0.55, ['production', 0.5]), 'status: unclear', 'ship: unclear')
     await runTurn($)
     await clock.settle()
 
     expect(completes.length).toBe(1)
-    expect(forks.length).toBe(0)
+    expect(forks.length).toBe(1)
+    expect(forks[0]).not.toContain('needaction')
     await expectBand($, 'done 55%', '? needs review · Jev suggested production 50%')
   },
 )
 
+// ——— Active work across turns ———
+
+test('"yes, push it" after earlier work is judged as that work, not n/a', { options: KEY }, async ($, on) => {
+  const { replies, body, forks, clock } = world(on, jevSays('done', 0.95, ['production', 0.92]))
+  // Earlier turn: the change is made and verified.
+  await runTurn($, { prompt: 'Fix the login bug.', bash: ['npm test', 'npm run build'], answer: 'Fixed it; tests and build pass.' })
+  await clock.settle()
+  await expectBand($, '▲ production 92%')
+
+  // This turn has no edits of its own; Jev, seeing only it, leans n/a without confidence.
+  replies.jev = jevSays('done', 0.97, ['na', 0.4])
+  const outcomes: [string, string][] = [
+    ['ship: production', '▲ production · Claude, session context (Jev 40%)'],
+    ['ship: development', '◆ development · Claude, session context (Jev 40%)'],
+    ['ship: blocked', '■ blocked · Claude, session context (Jev 40%)'],
+    ['ship: unclear', '? needs review · Jev suggested na 40%'],
+  ]
+  for (const [reply, shown] of outcomes) {
+    replies.session = reply
+    await runTurn($, { prompt: 'yes, push it', bash: ['git push origin main'], answer: 'Pushed 3 commits to origin/main.' })
+    await clock.settle()
+    await expectBand($, shown)
+    for (const surface of SURFACES) expect(await bandText($, surface)).not.toContain('– n/a')
+  }
+
+  // The Jev question and the session-context review both say earlier turns count.
+  const { questions } = body()
+  expect(questions.ship.instructions).toContain('current active work represented by this session')
+  expect(questions.ship.criteria.na).toContain('not na when it pushes, merges, releases, approves or otherwise continues')
+  const prompt = forks.at(-1)!
+  expect(prompt).toContain(
+    'Review the current session context and judge the latest active deliverable work, not just the most recent turn.',
+  )
+  expect(prompt).toContain(
+    'Work created or verified in earlier turns still counts if the current turn is pushing, merging, releasing, approving, or otherwise continuing that work.',
+  )
+  expect(prompt).toContain('Use na only when there is genuinely no active deliverable work in the session.')
+})
+
+test('a turn that delivers work sends ship to the session context even when Jev is sure', { options: KEY }, async ($, on) => {
+  const { replies, forks, clock } = world(on, jevSays('done', 0.98, ['development', 0.99]), 'unused', 'ship: production')
+  const turn = (bash: string[]) => runTurn($, { prompt: 'push it', bash, answer: 'Done, pushed.' })
+
+  // Jev sees only this turn, so it is sure of development; the session context shows the earlier verification.
+  await turn(['git push origin main'])
+  await clock.settle()
+  expect(forks.length).toBe(1)
+  expect(forks[0]).not.toContain('needaction')
+  await expectBand($, '▲ production · Claude, session context (Jev 99%)')
+
+  // When the review can't tell, Jev's confident answer stands.
+  replies.session = 'ship: unclear'
+  await turn(['git push'])
+  await clock.settle()
+  await expectBand($, '◆ development 99%')
+
+  replies.session = 'ship: production'
+  for (const command of ['gh pr merge 42 --squash', 'cd app && git push -u origin feat', 'npm publish', 'GIT_TRACE=1 git push 2>&1 | tail -3', 'terraform apply -auto-approve', 'git merge feat FAIL']) {
+    const before = forks.length
+    await turn([command])
+    await clock.settle()
+    expect(forks.length).toBe(before + 1)
+  }
+  for (const command of ['git status', 'git log --oneline | head', 'echo git push', 'git commit -m "wip; git push later"']) {
+    const before = forks.length
+    await turn([command])
+    await clock.settle()
+    expect(forks.length).toBe(before)
+  }
+})
+
+test('a threshold of 0 opts delivery turns out of the review too', { options: { ...KEY, claude_below: 0 } }, async ($, on) => {
+  const { forks, clock } = world(on, jevSays('done', 0.98, ['development', 0.99]), 'unused', 'ship: production')
+  await runTurn($, { prompt: 'push it', bash: ['git push'], answer: 'Pushed.' })
+  await clock.settle()
+
+  expect(forks.length).toBe(0)
+  await expectBand($, '◆ development 99%')
+})
+
+test('a confident n/a stands without a review', { options: KEY }, async ($, on) => {
+  const { completes, forks, clock } = world(on, jevSays('needaction', 0.97, ['na', 0.96]))
+  await runTurn($, { prompt: 'Hi', answer: 'Hi! What can I help you with?' })
+  await clock.settle()
+
+  expect(completes.length + forks.length).toBe(0)
+  await expectBand($, 'JEV ship: – n/a 96%')
+})
+
+test('an unsure task and ship share one session-context review', { options: KEY }, async ($, on) => {
+  const { completes, forks, clock } = world(on, jevSays('done', 0.5, ['na', 0.3]), 'status: unclear', 'status: failed\nship: blocked')
+  await runTurn($)
+  await clock.settle()
+
+  expect(completes.length).toBe(1)
+  expect(forks.length).toBe(1)
+  expect(forks[0]).toContain('status: <choice>')
+  expect(forks[0]).toContain('ship: <choice>')
+  await expectBand($, 'failed · Claude, session context (Jev 50%)', 'blocked · Claude, session context (Jev 30%)')
+})
+
 // ——— Reading Claude's replies ———
 
 test('reviewer replies are read strictly, per line', { options: KEY }, async ($, on) => {
-  const { replies, clock } = world(on, jevSays('done', 0.5, ['production', 0.5]), '', 'deploy: unclear\nstatus: unclear')
+  const { replies, clock } = world(on, jevSays('done', 0.5, ['production', 0.5]))
+  // The task goes to the summary review first, ship to the session context; both read the same reply here.
   const cases: [string, string[]][] = [
-    ['**Status:** needs action\n**Deploy:** no-deploy', ['needs action · Claude (Jev 50%)', 'not deployable · Claude (Jev 50%)']],
-    ['- status: `done`.\n- deploy: Development', ['✔ done · Claude (Jev 50%)', 'development only · Claude (Jev 50%)']],
-    ['Status: needs_action\nDeploy: nothing to deploy', ['needs action · Claude', 'nothing to deploy · Claude']],
-    ['status: not done\ndeploy: probably production', ['✔ done 50%', '? needs review · Jev suggested production 50%']],
-    ['status: done\ndeploy: production might work', ['✔ done · Claude', '? needs review']],
-    ['status: done\ndeploy: production\ndeploy: nothing', ['✔ done · Claude', '? needs review']],
-    ['status: done, deploy: production', ['✔ done 50%', '? needs review']],
+    ['**Status:** needs action\n**Ship:** Blocked', ['needs action · Claude (Jev 50%)', 'blocked · Claude, session context (Jev 50%)']],
+    ['- status: `done`.\n- ship: Development', ['✔ done · Claude (Jev 50%)', 'development · Claude, session context (Jev 50%)']],
+    ['Status: needs_action\nShip: N/A', ['needs action · Claude', '– n/a · Claude, session context']],
+    ['status: not done\nship: probably production', ['✔ done 50%', '? needs review · Jev suggested production 50%']],
+    ['status: done\nship: production might work', ['✔ done · Claude', '? needs review']],
+    ['status: done\nship: production\nship: na', ['✔ done · Claude', '? needs review']],
+    ['status: done, ship: production', ['✔ done 50%', '? needs review']],
     ['done\nproduction', ['✔ done 50%', '? needs review']],
-    ['status: constructor\ndeploy: hasOwnProperty', ['✔ done 50%', '? needs review']],
+    ['status: constructor\nship: hasOwnProperty', ['✔ done 50%', '? needs review']],
   ]
   for (const [text, shown] of cases) {
     replies.claude = text
+    replies.session = text
     await runTurn($)
     await clock.settle()
     await expectBand($, ...shown)
@@ -383,11 +482,11 @@ test('reviewer replies are read strictly, per line', { options: KEY }, async ($,
 })
 
 test('a bare one-word reply answers a lone question', { options: KEY }, async ($, on) => {
-  const { clock } = world(on, jevSays('done', 0.95, ['production', 0.4]), 'Development.')
+  const { clock } = world(on, jevSays('done', 0.95, ['production', 0.4]), 'unused', 'Development.')
   await runTurn($)
   await clock.settle()
 
-  await expectBand($, 'development only · Claude (Jev 40%)')
+  await expectBand($, 'development · Claude, session context (Jev 40%)')
 })
 
 // ——— Thresholds ———
@@ -406,8 +505,8 @@ test(
 )
 
 test(
-  'task and deploy thresholds override the generic one',
-  { options: { ...KEY, claude_below: 10, task_below: 95, deploy_below: 50 } },
+  'task and ship thresholds override the generic one',
+  { options: { ...KEY, claude_below: 10, task_below: 95, ship_below: 50 } },
   async ($, on) => {
     const { completes, clock } = world(on, jevSays('done', 0.9, ['development', 0.6]), 'status: failed')
     await runTurn($)
@@ -415,7 +514,7 @@ test(
 
     expect(completes.length).toBe(1)
     expect(completes[0]!.system).not.toContain('production')
-    await expectBand($, 'failed · Claude (Jev 90%)', 'development only 60%')
+    await expectBand($, 'failed · Claude (Jev 90%)', 'development 60%')
   },
 )
 
@@ -423,17 +522,17 @@ test(
   'a stricter production threshold only applies to production',
   { options: { ...KEY, production_below: 90 } },
   async ($, on) => {
-    const { replies, completes, clock } = world(on, jevSays('done', 0.95, ['development', 0.85]), 'deploy: development')
+    const { replies, forks, clock } = world(on, jevSays('done', 0.95, ['development', 0.85]), 'unused', 'ship: development')
     await runTurn($)
     await clock.settle()
-    expect(completes.length).toBe(0)
-    await expectBand($, 'development only 85%')
+    expect(forks.length).toBe(0)
+    await expectBand($, 'development 85%')
 
     replies.jev = jevSays('done', 0.95, ['production', 0.85])
     await runTurn($)
     await clock.settle()
-    expect(completes.length).toBe(1)
-    await expectBand($, 'development only · Claude (Jev 85%)')
+    expect(forks.length).toBe(1)
+    await expectBand($, 'development · Claude, session context (Jev 85%)')
   },
 )
 
@@ -443,23 +542,24 @@ test('a threshold of 0 never asks Claude', { options: { ...KEY, claude_below: 0 
   await clock.settle()
 
   expect(completes.length + forks.length).toBe(0)
-  await expectBand($, 'done 20%', 'development only 10%')
+  await expectBand($, 'done 20%', 'development 10%')
 })
 
 // ——— Jev failures ———
 
 test('with no key Claude stands in for both, and nothing goes to TypeSafe', async ($, on) => {
-  const { sent, completes, clock } = world(on, jevSays('done', 1), 'status: needaction\ndeploy: nothing')
+  const { sent, completes, forks, clock } = world(on, jevSays('done', 1), 'status: needaction', 'ship: na')
   await runTurn($)
   await clock.settle()
 
   expect(sent.length).toBe(0)
   expect(completes.length).toBe(1)
-  await expectBand($, 'needs action · Claude (no Jev key)', 'nothing to deploy · Claude (no Jev key)')
+  expect(forks.length).toBe(1)
+  await expectBand($, 'needs action · Claude (no Jev key)', 'n/a · Claude, session context (no Jev key)')
 })
 
 test('without HOME no key file is looked for', async ($, on) => {
-  const { sent, looked, clock } = world(on, jevSays('done', 1), 'status: done\ndeploy: nothing', undefined, {})
+  const { sent, looked, clock } = world(on, jevSays('done', 1), 'status: done\nship: na', undefined, {})
   await runTurn($)
   await clock.settle()
 
@@ -469,19 +569,19 @@ test('without HOME no key file is looked for', async ($, on) => {
 })
 
 test('an HTTP error hands both over to Claude', { options: { api_key: 'bad' } }, async ($, on) => {
-  const { clock } = world(on, { status: 401, body: { error: 'unauthorized' } }, 'status: done\ndeploy: development')
+  const { clock } = world(on, { status: 401, body: { error: 'unauthorized' } }, 'status: done', 'ship: development')
   await runTurn($)
   await clock.settle()
 
-  await expectBand($, 'done · Claude (Jev HTTP 401)', 'development only · Claude (Jev HTTP 401)')
+  await expectBand($, 'done · Claude (Jev HTTP 401)', 'development · Claude, session context (Jev HTTP 401)')
 })
 
 test('a network error hands both over to Claude', { options: KEY }, async ($, on) => {
-  const { clock } = world(on, 'network', 'status: done\ndeploy: nothing')
+  const { clock } = world(on, 'network', 'status: done', 'ship: na')
   await runTurn($)
   await clock.settle()
 
-  await expectBand($, 'done · Claude (Jev network error)', 'nothing to deploy · Claude (Jev network error)')
+  await expectBand($, 'done · Claude (Jev network error)', 'n/a · Claude, session context (Jev network error)')
 })
 
 test('with the fallback off, Jev failures show once, as they are', { options: NO_FALLBACK }, async ($, on) => {
@@ -505,7 +605,7 @@ test('malformed answers are errors, never confident', { options: NO_FALLBACK }, 
   const { replies, clock } = world(on, jevSays('done', 1))
   const status = (answer: unknown): JevReply => ({
     status: 200,
-    body: { answers: { status: answer, deploy: { type: 'choice', choice: 'nothing', confidence: 0.9 } } },
+    body: { answers: { status: answer, ship: { type: 'choice', choice: 'na', confidence: 0.9 } } },
   })
   const cases: [unknown, string][] = [
     [{ type: 'choice', choice: 'done' }, 'bad confidence'],
@@ -524,30 +624,32 @@ test('malformed answers are errors, never confident', { options: NO_FALLBACK }, 
     replies.jev = status(answer)
     await runTurn($)
     await clock.settle()
-    await expectBand($, `JEV task:   Jev error (${why})`, 'nothing to deploy 90%')
+    await expectBand($, `JEV task: Jev error (${why})`, 'n/a 90%')
   }
 })
 
 test('a question missing from the answers fails alone', { options: NO_FALLBACK }, async ($, on) => {
-  const { clock } = world(on, { raw: '{"answers":{"deploy":{"type":"choice","choice":"nothing","confidence":0.9}}}' })
+  const { clock } = world(on, { raw: '{"answers":{"ship":{"type":"choice","choice":"na","confidence":0.9}}}' })
   await runTurn($)
   await clock.settle()
 
-  await expectBand($, 'Jev error (no answer)', 'nothing to deploy 90%')
+  await expectBand($, 'Jev error (no answer)', 'n/a 90%')
 })
 
 test('a partly valid response sends only the broken question to Claude', { options: KEY }, async ($, on) => {
-  const { completes, clock } = world(
+  const { completes, forks, clock } = world(
     on,
     { status: 200, body: { answers: { status: { type: 'choice', choice: 'done', confidence: 0.95 } } } },
-    'deploy: development',
+    'unused',
+    'ship: development',
   )
   await runTurn($)
   await clock.settle()
 
-  expect(completes.length).toBe(1)
-  expect(completes[0]!.system).not.toContain('needaction')
-  await expectBand($, '✔ done 95%', 'development only · Claude (Jev no answer)')
+  expect(completes.length).toBe(0)
+  expect(forks.length).toBe(1)
+  expect(forks[0]).not.toContain('needaction')
+  await expectBand($, '✔ done 95%', 'development · Claude, session context (Jev no answer)')
 })
 
 // ——— Turns ———
@@ -565,14 +667,14 @@ test('a new turn clears the last verdict, and an interrupted one brings nothing 
 
 test('an older judgement never overwrites a newer turn', { options: KEY }, async ($, on) => {
   const { sent, clock } = world(on, state =>
-    state.user_request === 'first' ? jevSays('failed', 0.99, ['nodeploy', 0.99]) : jevSays('done', 0.98, ['nothing', 0.97]),
+    state.user_request === 'first' ? jevSays('failed', 0.99, ['blocked', 0.99]) : jevSays('done', 0.98, ['na', 0.97]),
   )
   // The first turn's judgement is still pending when the second turn ends.
   await runTurn($, { prompt: 'first' })
   await runTurn($, { prompt: 'second' })
   await clock.settle()
 
-  await expectBand($, 'done 98%', 'nothing to deploy 97%')
+  await expectBand($, 'done 98%', 'n/a 97%')
   for (const surface of SURFACES) expect(await bandText($, surface)).not.toContain('failed')
   expect(sent.length).toBeGreaterThan(0)
 })
@@ -752,15 +854,15 @@ test('production cannot stand against a check seen failing', { options: KEY }, a
 
   await expectBand($, '? needs review · Jev suggested production 95%, but observed tests failed')
   expect(toasts).toEqual([
-    'done (95%) · deploy: needs review (Jev suggested production 95%, but observed tests failed)',
+    'done (95%) · ship: needs review (Jev suggested production 95%, but observed tests failed)',
   ])
 })
 
 // ——— Options and state ———
 
 test(
-  'with the deploy check off, only the task is asked and shown',
-  { options: { ...KEY, deploy_check: false } },
+  'with the ship check off, only the task is asked and shown',
+  { options: { ...KEY, ship_check: false } },
   async ($, on) => {
     const { body, toasts, clock } = world(on, jevSays('done', 0.9))
     await runTurn($)
@@ -770,7 +872,7 @@ test(
     for (const surface of SURFACES) {
       const band = await bandText($, surface)
       expect(band).toContain('JEV: ✔ done 90%')
-      expect(band).not.toContain('deploy')
+      expect(band).not.toContain('ship')
     }
     expect(toasts).toEqual(['done (90%)'])
   },

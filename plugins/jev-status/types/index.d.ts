@@ -1,11 +1,14 @@
-/** Where the user's task stands at the end of the turn. Says nothing about deployment. */
+/** Where the user's task stands at the end of the turn. Says nothing about delivery. */
 export type Status = 'done' | 'needaction' | 'failed'
 
-/** How ready the turn's deployable work is. Says nothing about whether the user is needed. */
-export type Deploy = 'production' | 'development' | 'nodeploy' | 'nothing'
+/**
+ * The highest safe delivery level for the session's current active work, which
+ * may come from earlier turns. Says nothing about whether the user is needed.
+ */
+export type Ship = 'production' | 'development' | 'blocked' | 'na'
 
 /** The two evaluations made after each turn (`status` is the task row). */
-export type Question = 'status' | 'deploy'
+export type Question = 'status' | 'ship'
 
 /** A verification the plugin can see the agent run. */
 export type Check = 'tests' | 'build' | 'typecheck' | 'lint'
@@ -16,7 +19,7 @@ export type Observed = 'passed' | 'failed' | 'unknown'
 /** One evaluation's answer, who gave it, or why there is none. */
 export type Answer<C extends string = string> = {
   /**
-   * The choice; `nokey` and `error` when Jev gave none, and for deploy only,
+   * The choice; `nokey` and `error` when Jev gave none, and for ship only,
    * `review`: the plugin's own fail-closed state when no one could settle it.
    */
   choice: C | 'nokey' | 'error'
@@ -34,8 +37,8 @@ export type Answer<C extends string = string> = {
   note?: string
 }
 
-/** The verdict on the last turn; `deploy` is absent when that check is off. */
-export type Verdict = { status: Answer<Status>; deploy?: Answer<Deploy | 'review'> }
+/** The verdict on the last turn; `ship` is absent when that check is off. */
+export type Verdict = { status: Answer<Status>; ship?: Answer<Ship | 'review'> }
 
 /** running: a turn is in progress; checking: it ended and no verdict is in yet. */
 export type Phase = 'idle' | 'running' | 'checking'

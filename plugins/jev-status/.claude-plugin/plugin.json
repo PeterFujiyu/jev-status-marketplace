@@ -1,7 +1,7 @@
 {
   "name": "jev-status",
-  "version": "0.6.1",
-  "description": "After each turn asks TypeSafe Jev two independent questions, where the task stands (done, needaction, failed) and how ready its deployable work is (production, development, nodeploy, nothing), with Claude as a second opinion and a fail-closed 'needs review' for deploy, and shows both above the prompt",
+  "version": "0.7.0",
+  "description": "After each turn asks TypeSafe Jev two independent questions, where the task stands (done, needaction, failed) and the highest safe delivery level of the session's current active work (production, development, blocked, na), with Claude as a second opinion and a fail-closed 'needs review' for ship, and shows both above the prompt",
   "author": {
     "name": "peter"
   },
@@ -20,16 +20,16 @@
       "description": "Also show each verdict as a toast",
       "default": true
     },
-    "deploy_check": {
+    "ship_check": {
       "type": "boolean",
-      "title": "Deploy check",
-      "description": "Also ask how ready the turn's deployable work is: production, development only, not deployable, or nothing to deploy",
+      "title": "Ship check",
+      "description": "Also ask the highest safe delivery level of the session's current active work: production, development, blocked, or n/a",
       "default": true
     },
     "claude_below": {
       "type": "number",
       "title": "Ask Claude below (% Jev confidence)",
-      "description": "When Jev's confidence in an answer is under this percentage, ask Claude for a second opinion on it. Used for both questions unless the task or deploy threshold below is set. 0 never asks.",
+      "description": "When Jev's confidence in an answer is under this percentage, ask Claude for a second opinion on it. Used for both questions unless the task or ship threshold below is set. 0 never asks.",
       "default": 70
     },
     "task_below": {
@@ -38,22 +38,22 @@
       "description": "Overrides 'Ask Claude below' for the task question. Leave empty to use it.",
       "required": false
     },
-    "deploy_below": {
+    "ship_below": {
       "type": "number",
-      "title": "Deploy threshold (%)",
-      "description": "Overrides 'Ask Claude below' for the deploy question. Leave empty to use it.",
+      "title": "Ship threshold (%)",
+      "description": "Overrides 'Ask Claude below' for the ship question. Leave empty to use it.",
       "required": false
     },
     "production_below": {
       "type": "number",
       "title": "Production threshold (%)",
-      "description": "A stricter threshold for a 'production' answer from Jev; applies only when higher than the deploy threshold. Leave empty to use the deploy threshold.",
+      "description": "A stricter threshold for a 'production' answer from Jev; applies only when higher than the ship threshold. Leave empty to use the ship threshold.",
       "required": false
     },
     "claude_view": {
       "type": "string",
       "title": "Claude's view",
-      "description": "summary: the review model reads what Jev read (prompt and final-message excerpts, tool errors, observed checks). summary-then-conversation: the same, and when that is not enough to tell, the session's own model reviews the session context: the conversation as Claude Code currently holds it, which may already be compacted. conversation: always the session context.",
+      "description": "For the task question. summary: the review model reads what Jev read (prompt and final-message excerpts, tool errors, observed checks). summary-then-conversation: the same, and when that is not enough to tell, the session's own model reviews the session context: the conversation as Claude Code currently holds it, which may already be compacted. conversation: always the session context. The ship question always goes to the session context, since it is about work that may come from earlier turns.",
       "options": [
         "summary",
         "summary-then-conversation",

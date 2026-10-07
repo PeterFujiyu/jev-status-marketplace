@@ -5,18 +5,18 @@ every turn and shows both answers above the prompt (terminal, the desktop Code t
 short toast:
 
 ```
-JEV task:   ✔ done 96%
-JEV deploy: ▲ production 91%
+JEV task: ✔ done 97%
+JEV ship: ▲ production 91%
 ```
 
 ```
-JEV task:   ✔ done 95%
-JEV deploy: ? needs review · Jev suggested production 35%
+JEV task: ✔ done 95%
+JEV ship: ? needs review · Jev suggested production 35%
 ```
 
 ## The two questions
 
-**task**: where your request stands. It says nothing about deployment.
+**task**: where your request stands. It says nothing about delivery.
 
 | task | means |
 |---|---|
@@ -24,41 +24,54 @@ JEV deploy: ? needs review · Jev suggested production 35%
 | ● needs action | the agent is waiting on you: a question, a decision, an approval, credentials, a manual step, or just your next request (as after "Hi") |
 | ✘ failed | the agent could not complete it: unresolved errors, gave up, or the result doesn't work |
 
-**deploy**: how ready the turn's deployable work is. It says nothing about whether you are needed, so
-work can be production-ready while the agent waits for your go-ahead, and a greeting is
-`needs action` with `nothing to deploy`.
+**ship**: the highest safe delivery level for the **current active work** in the session, which may
+come from earlier turns. A turn with no edits of its own (like "yes, push it" after the work was
+written and tested earlier) is still about that work, not `n/a`. It says nothing about whether you
+are needed, so work can be production-ready while the agent waits for your go-ahead.
 
-| deploy | means |
+| ship | means |
 |---|---|
-| ▲ production | deployable work was produced, the relevant verification was reported or observed passing, and there are no known blockers or unresolved risks |
-| ◆ development only | deployable work that looks usable but wasn't fully verified; fine for development or staging, not production |
-| ■ not deployable | deployable work with a known blocker or failure, unfinished, risky (migrations, destructive or irreversible steps, security- or credential-sensitive changes), or an explicit warning not to ship |
-| – nothing to deploy | no environment-deployable work: research, an explanation, planning, a code review, conversation |
-| ? needs review | the plugin's own state, never one of Jev's choices: no one could settle the deploy answer with enough confidence, or the plugin saw a check fail that contradicts `production` |
+| ▲ production | the active work's relevant verification was reported or observed passing, with no known blockers or unresolved risks; ready to push or merge and release |
+| ◆ development | usable but not verified enough for production; safe to push or merge for development or staging |
+| ■ blocked | shouldn't be pushed, merged or deployed yet: a known failure, unfinished work, an unresolved risk (migrations, destructive or irreversible steps, security- or credential-sensitive changes), or a required fix or review |
+| – n/a | genuinely no active deliverable work in the session: questions, research, explanation, planning, conversation |
+| ? needs review | the plugin's own state, never one of Jev's choices: no one could settle the ship answer with enough confidence, or the plugin saw a check fail that contradicts `production` |
 
 **`production` means technical readiness only.** It does not replace CI, code review, branch
-protection, approvals or your release policy, and the plugin never deploys anything.
+protection, approvals or your release policy, and the plugin never pushes or deploys anything.
 
 ## Who decides
 
-For each question separately:
+1. **Jev** answers both questions in one request. It sees only the latest turn (see *What is sent*).
+   Answers are validated strictly: a known choice and a confidence between 0 and 1, or the answer
+   counts as a Jev error.
+2. **task**, when Jev's confidence is under the task threshold (or Jev failed and the fallback is
+   on): a **quick Claude review** reads the same summary Jev read; if it answers `unclear`, the
+   session-context review below takes over (as set by *Claude's view*).
+3. **ship** goes straight to the **session-context review** when:
+   - Jev's confidence is under the ship threshold, which includes a low-confidence `n/a`;
+   - Jev says `production` under the production threshold;
+   - the turn ran a delivery command (`git push`/`merge`, `gh pr merge`, `npm publish`,
+     `terraform apply`, `… deploy`, …), even if Jev is sure. Jev can't see the earlier turns
+     where that work was written and verified;
+   - or Jev failed and the fallback is on.
 
-1. **Jev** answers both questions in one request. Answers are validated strictly: a known choice and
-   a confidence between 0 and 1, or the answer counts as a Jev error.
-2. If Jev's confidence is under the question's threshold (or Jev failed and the fallback is on), a
-   **quick Claude review** reads the same summary Jev read.
-3. If that review answers `unclear`, the **session's own model** reviews the **session context**:
-   the conversation as Claude Code holds it at that moment. Claude Code may have already compacted
-   it, so this review sees the summary and the turns kept since, not necessarily every earlier
-   detail. It is a second look with more context, not a lossless record. It may also answer
-   `unclear`.
+   The current-turn summary can't show work from earlier turns, so it is skipped for ship.
+
+The **session-context review** is the session's own model, asked to judge the latest active work
+across the session as Claude Code holds it at that moment. Claude Code may have already compacted
+the conversation, so this review sees the summary and the turns kept since, not necessarily every
+earlier detail. It is a second look with more context, not a lossless record. When both questions
+need it, one review answers both. It may answer `unclear`.
 
 When no one can settle a question (with Claude's review turned on; a threshold of 0 opts out of
-reviews, and Jev's answer then shows as given, even a low-confidence `production`):
+reviews, delivery turns included, and Jev's answer then shows as given, even a low-confidence
+`production`):
 
 - **task** keeps Jev's low-confidence answer, shown with its percentage.
-- **deploy** fails closed: it shows `? needs review` with what Jev suggested, never a
-  low-confidence green `production`. The same happens when the review fails or times out.
+- **ship** fails closed: it shows `? needs review` with what Jev suggested, never a low-confidence
+  green `production`. The same happens when the review fails or times out. On a delivery turn
+  where Jev was sure, its answer stands.
 
 A Jev error (HTTP failure, invalid JSON, malformed answer) with no Claude answer shows as
 `Jev error (…)`.
@@ -69,7 +82,7 @@ The plugin watches the Bash commands the agent runs during the turn and records 
 `passed`, `failed` or `unknown`: **tests**, **build**, **typecheck** and **lint** (e.g. `npm test`,
 `pytest`, `cargo build`, `tsc`, `eslint`). These are observations, kept apart from what the agent
 claims in its final message, and are sent to Jev and the summary review as such. If the plugin saw
-a check fail (its latest run in the turn) and the answer is `production`, the deploy row shows
+a check fail (its latest run in the turn) and the answer is `production`, the ship row shows
 `? needs review · …, but observed tests failed` instead.
 
 Limits, chosen so that an observation errs towards `unknown` rather than `passed`:
@@ -123,17 +136,21 @@ Without a key nothing goes to TypeSafe; Claude judges each turn instead (unless 
 |---|---|---|
 | TypeSafe API key | empty | see above |
 | Toast each verdict | on | also show each verdict as a toast |
-| Deploy check | on | also ask the deploy question; off shows only the task row |
-| Ask Claude below (% Jev confidence) | 70 | below this, Claude gives a second opinion on that answer; used for both questions unless overridden below; 0 never asks |
+| Ship check | on | also ask the ship question; off shows only the task row |
+| Ask Claude below (% Jev confidence) | 70 | below this, Claude gives a second opinion on that answer; used for both questions unless overridden below; 0 never asks (delivery turns included) |
 | Task threshold (%) | empty | overrides the above for the task question |
-| Deploy threshold (%) | empty | overrides the above for the deploy question |
-| Production threshold (%) | empty | a stricter threshold for a `production` answer from Jev; applies only when higher than the deploy threshold |
-| Claude's view | summary-then-conversation | `summary`: only the quick review of what Jev read. `summary-then-conversation`: the same, then the session-context review when the summary isn't enough. `conversation`: always the session-context review |
+| Ship threshold (%) | empty | overrides the above for the ship question (a value set as 0.6's *Deploy threshold* still applies) |
+| Production threshold (%) | empty | a stricter threshold for a `production` answer from Jev; applies only when higher than the ship threshold |
+| Claude's view | summary-then-conversation | for the **task** question: `summary`: only the quick review of what Jev read. `summary-then-conversation`: the same, then the session-context review when the summary isn't enough. `conversation`: always the session-context review. The ship question always uses the session-context review |
 | Claude review model | haiku | model for the summary review: an alias (`haiku`, `sonnet`, `opus`) or a full model id. The session-context review always uses the session's own model, which lets it reuse the prompt cache |
 | Ask Claude when Jev can't answer | on | with no TypeSafe key or a Jev error, Claude answers instead of an error showing |
 
-Claude's reviews use your own Claude Code account and count toward its usage. They only run on
-answers Jev is unsure of or can't give, and one review covers every question that needs it.
+Claude's reviews use your own Claude Code account and count toward its usage. They run on answers
+Jev is unsure of or can't give, and on ship for turns that push, merge or deploy; one review covers
+every question that needs it.
+
+Upgrading from 0.6: the *Deploy check* option is now *Ship check*. If you had turned it off, turn
+*Ship check* off again.
 
 ## What is sent, and privacy
 
@@ -147,6 +164,9 @@ TypeSafe at `https://api.typesafe.ai/v1/systemone` containing:
   characters each), and how many errors there were in all,
 - the four observed check states (`passed` / `failed` / `unknown`; no command lines, no output),
 - the fixed questions and their choices.
+
+Jev sees only that latest turn, never earlier ones; that is why ship answers lean on the
+session-context review.
 
 Nothing else: no files, no other tool output, no earlier turns; subagents' own final answers are not
 judged or sent. Note that the
