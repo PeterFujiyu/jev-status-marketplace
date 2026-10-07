@@ -11,7 +11,7 @@ JEV: ● needs action 100%
 ## Install
 
 ```bash
-claude plugin marketplace add <path or GitHub owner/repo of this marketplace>
+claude plugin marketplace add PeterFujiyu/jev-status-marketplace
 claude plugin install jev-status@peter-plugins
 ```
 
