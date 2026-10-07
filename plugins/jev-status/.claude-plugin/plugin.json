@@ -1,8 +1,10 @@
 {
   "name": "jev-status",
-  "version": "0.4.0",
-  "description": "Asks TypeSafe Jev whether each turn left the task done, needaction or failed (and Claude when Jev is unsure), and shows the verdict above the prompt",
-  "author": { "name": "peter" },
+  "version": "0.5.0",
+  "description": "After each turn asks TypeSafe Jev whether the task is done, needaction or failed, and whether the work may be deployed to production, development only, or not directly (Claude gives a second opinion when Jev is unsure), and shows both above the prompt",
+  "author": {
+    "name": "peter"
+  },
   "types": "./types/index.d.ts",
   "userConfig": {
     "api_key": {
@@ -18,17 +20,27 @@
       "description": "Also show each verdict as a toast",
       "default": true
     },
+    "deploy_check": {
+      "type": "boolean",
+      "title": "Deploy check",
+      "description": "Also ask whether the turn's work may be deployed: to production, to development only, not directly, or nothing to deploy",
+      "default": true
+    },
     "claude_below": {
       "type": "number",
       "title": "Ask Claude below (% Jev confidence)",
-      "description": "When Jev's confidence is under this percentage, ask Claude for a second opinion and show Claude's answer. 0 never asks.",
+      "description": "When Jev's confidence in an answer is under this percentage, ask Claude for a second opinion on it and show Claude's answer. Applies to each check separately. 0 never asks.",
       "default": 70
     },
     "claude_view": {
       "type": "string",
       "title": "Claude's view",
       "description": "summary: the review model reads what Jev read (prompt, final message, tool errors). summary-then-conversation: the same, and when that is not enough to tell, the session's own model re-reads the whole session (from cache). conversation: always the whole session.",
-      "options": ["summary", "summary-then-conversation", "conversation"],
+      "options": [
+        "summary",
+        "summary-then-conversation",
+        "conversation"
+      ],
       "default": "summary-then-conversation"
     },
     "review_model": {
