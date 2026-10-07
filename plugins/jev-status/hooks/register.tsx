@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, ToolCallInput, ToolCallResult } from 'claude-code'
 
-import type { Answer, Check, Observed, Phase, Question, Ship, Status, Verdict } from '../types'
+import type { Answer, Check, Observed, Phase, Question, Ship, Status, Verdict, Verification } from '../types'
 
 // After each turn, asks TypeSafe Jev two independent things: where the user's
 // task stands (done, waiting on the user, failed), and the highest safe delivery
@@ -27,7 +27,7 @@ const MAX_ERRORS = 3
 const MAX_ERROR_CHARS = 300
 const DEFAULT_BELOW = 70
 
-type Choices = { status: Status; ship: Ship }
+type Choices = { status: Status; ship: Ship; verification: Verification }
 
 const CRITERIA: { [Q in Question]: Record<Choices[Q], string> } = {
   status: {
@@ -60,6 +60,19 @@ const CRITERIA: { [Q in Question]: Record<Choices[Q], string> } = {
       'explanation, planning or conversation. A turn with no new edits is not na when it pushes, merges, ' +
       'releases, approves or otherwise continues work from earlier turns.',
   },
+  verification: {
+    complete:
+      'The verification the current active work evidently calls for was completed successfully, as ' +
+      'reported or observed (for a code change, typically its tests and build), and nothing is reported ' +
+      'as still pending. Do not require checks the work does not call for and the agent does not mention.',
+    incomplete:
+      'A relevant verification the work calls for or the agent mentions (a test, manual check, runtime ' +
+      'validation, integration, environment or compatibility check) is still pending, unchecked, not run, ' +
+      'or described as still manual. Wording such as still manual, unchecked, not tested, not run, pending ' +
+      'verification, needs validation, requires manual testing or open checks points here, even when the ' +
+      'implementation itself is complete.',
+    unknown: 'The available evidence is not enough to tell whether all relevant verification is complete.',
+  },
 }
 
 const ASKS: Record<Question, string> = {
@@ -71,6 +84,10 @@ const ASKS: Record<Question, string> = {
     'either way. Judge only technical ' +
     'readiness, not whether the agent waits on the user; production readiness does not replace CI, ' +
     'review, approvals or release policy.',
+  verification:
+    'Has all the verification that the current active work in this session needs been completed ' +
+    'successfully? Implementation complete does not mean verified. Earlier turns count as for ship. ' +
+    'Judge only verification, not readiness or the task.',
 }
 
 const STATE =
@@ -105,9 +122,15 @@ const SHIP_REVIEW =
   'turn is pushing, merging, releasing, approving, or otherwise continuing that work. Use na only when ' +
   'there is genuinely no active deliverable work in the session. '
 
+const VERIFICATION_REVIEW =
+  'On the verification question: judge it across the session the same way, and as strictly as an ' +
+  'outside reviewer would, including for work you did yourself. Implementation complete does not mean ' +
+  'verified: any relevant check still pending, unchecked, not run or left manual makes it incomplete. '
+
 const forkPrompt = (qs: Question[]) =>
   "Step outside the conversation for a moment and judge the user's task as of your last message. " +
-  `${qs.includes('ship') ? SHIP_REVIEW : ''}${replyForm(qs)}\n\n${rubric(qs)}`
+  `${qs.includes('ship') ? SHIP_REVIEW : ''}${qs.includes('verification') ? VERIFICATION_REVIEW : ''}` +
+  `${replyForm(qs)}\n\n${rubric(qs)}`
 
 // `label` is drawn in color above the prompt; `words` is the plain text for a
 // toast, which shows no color and already carries the plugin's name.
@@ -314,12 +337,13 @@ function detail(a: Answer): string {
     const said = s ? `${s.by === 'jev' ? 'Jev' : 'Claude'} suggested ${s.choice}${typeof s.confidence === 'number' ? ` ${pct(s.confidence)}` : ''}` : ''
     return ` · ${[said, a.note].filter(Boolean).join(', but ')}`
   }
+  const why = a.note ? ` · ${a.note}` : ''
   if (a.source === 'claude') {
     const who = a.via === 'conversation' ? 'Claude, session context' : 'Claude'
-    return ` · ${who} (${typeof a.confidence === 'number' ? `Jev ${pct(a.confidence)}` : (a.error ?? 'Jev unsure')})`
+    return ` · ${who} (${typeof a.confidence === 'number' ? `Jev ${pct(a.confidence)}` : (a.error ?? 'Jev unsure')})${why}`
   }
-  if (typeof a.confidence === 'number') return ` ${pct(a.confidence)}`
-  return a.choice === 'error' && a.error ? ` (${a.error})` : ''
+  if (typeof a.confidence === 'number') return ` ${pct(a.confidence)}${why}`
+  return a.choice === 'error' && a.error ? ` (${a.error})` : why
 }
 
 /** A reviewer's value for `q`: one of its choices exactly, `unclear`, or undefined. */
@@ -432,19 +456,21 @@ async function reviewConversation($: EngineInterface, qs: Question[]): Promise<P
 
 /**
  * Claude's answers to `qs` and which view gave each; questions it could not tell
- * are left out. The task question goes through `claude_view`; ship is about the
- * session's active work, which only the session context shows, so it goes there.
+ * are left out. The task question goes through `claude_view`; ship and verification
+ * are about the session's active work, which only the session context shows, so they
+ * go there.
  */
 async function askClaude($: EngineInterface, s: Settings, turn: Turn, qs: Question[]) {
   const picked: Partial<Record<Question, { choice: string; via: 'summary' | 'conversation' }>> = {}
-  let task = qs.filter(q => q !== 'ship')
+  const sessionWide = (q: Question) => q === 'ship' || q === 'verification'
+  let task = qs.filter(q => !sessionWide(q))
   if (task.length > 0 && s.claudeView !== 'conversation') {
     const summary = await reviewSummary($, s, turn, task).catch((): Picks => ({}))
     for (const q of task) if (summary[q] !== undefined) picked[q] = { choice: summary[q]!, via: 'summary' }
     // The summary was not enough (unless the person wants the summary alone).
     task = s.claudeView === 'summary' ? [] : task.filter(q => picked[q] === undefined)
   }
-  const forked = [...task, ...qs.filter(q => q === 'ship')]
+  const forked = [...task, ...qs.filter(sessionWide)]
   if (forked.length === 0) return picked
   const whole = await reviewConversation($, forked).catch((): Picks => ({}))
   for (const q of forked) if (whole[q] !== undefined) picked[q] = { choice: whole[q]!, via: 'conversation' }
@@ -456,6 +482,7 @@ async function judge($: EngineInterface, s: Settings, turn: Turn): Promise<Verdi
   const key = await apiKey($, s.apiKey)
   const jev = key ? await askJev($, key, turn, qs) : allAre(qs, { choice: 'nokey', source: 'jev' })
 
+  // Verification shares ship's threshold; production also has its own, stricter one.
   const below = (q: Question, a: Answer) =>
     q === 'status' ? s.taskBelow : a.choice === 'production' ? Math.max(s.shipBelow, s.productionBelow) : s.shipBelow
   const unsure = (q: Question, a: Answer) =>
@@ -464,9 +491,17 @@ async function judge($: EngineInterface, s: Settings, turn: Turn): Promise<Verdi
   // turns, and an n/a right after a turn with active work may only be approving it: in both,
   // Jev's confidence says nothing about that work, so ship is reviewed from the session context.
   const continues = (q: Question, a: Answer) =>
-    q === 'ship' && !failedAnswer(a) && s.shipBelow > 0 && (turn.delivered || (turn.activeBefore && a.choice === 'na'))
-  const toClaude = qs.filter(
-    q => unsure(q, jev[q]!) || continues(q, jev[q]!) || (failedAnswer(jev[q]!) && s.claudeOnJevFailure),
+    !failedAnswer(a) &&
+    s.shipBelow > 0 &&
+    ((q === 'ship' && (turn.delivered || (turn.activeBefore && a.choice === 'na'))) ||
+      (q === 'verification' && turn.delivered))
+  const asked = (q: Question) =>
+    unsure(q, jev[q]!) || continues(q, jev[q]!) || (failedAnswer(jev[q]!) && s.claudeOnJevFailure)
+  // Verification only gates a production answer. It is reviewed with ship, so the gate never weighs
+  // a session-wide ship against a turn-local check, or on its own when Jev's ship is production.
+  const shipReviewed = qs.includes('ship') && asked('ship')
+  const toClaude = qs.filter(q =>
+    q === 'verification' ? shipReviewed || (asked(q) && jev.ship?.choice === 'production') : asked(q),
   )
   const claude = toClaude.length > 0 ? await askClaude($, s, turn, toClaude) : {}
 
@@ -482,32 +517,45 @@ async function judge($: EngineInterface, s: Settings, turn: Turn): Promise<Verdi
         confidence: failedAnswer(j) ? undefined : j.confidence,
         error: failedAnswer(j) ? (j.choice === 'nokey' ? 'no Jev key' : `Jev ${j.error ?? 'error'}`) : undefined,
       }
-    } else if (q === 'ship' && (unsure(q, j) || continues(q, j))) {
-      // Fail closed: a ship answer Jev couldn't be trusted on, and Claude couldn't settle, is not shown as Jev's.
+    } else if (q !== 'status' && toClaude.includes(q) && (unsure(q, j) || continues(q, j))) {
+      // Fail closed: a ship or verification answer Jev couldn't be trusted on, and Claude couldn't settle, is not Jev's.
       answers[q] = { choice: 'review', source: 'jev', suggested: { choice: j.choice, by: 'jev', confidence: j.confidence } }
     } else {
       answers[q] = j // the task row keeps Jev's answer; a failed ship row stays an error
     }
   }
 
-  // Production cannot stand against a check the plugin saw fail.
-  const d = answers.ship
-  const broken = CHECKS.filter(c => turn.checks[c] === 'failed')
-  if (d?.choice === 'production' && broken.length > 0) {
-    answers.ship = {
-      choice: 'review',
-      source: d.source,
-      suggested: { choice: 'production', by: d.source, confidence: d.source === 'jev' ? d.confidence : undefined },
-      note: `observed ${broken.join(', ')} failed`,
-    }
-  }
+  if (answers.ship !== undefined) answers.ship = gate(answers.ship, answers.verification, turn.checks)
   return answers as Verdict
+}
+
+/**
+ * The ship answer shown: production only with verification complete and no check
+ * seen failing. Incomplete verification (or a failed check) lowers it to
+ * development; verification unknown or unsettled turns it into needs review.
+ * Every other answer passes unchanged.
+ */
+function gate(ship: Answer, verification: Answer | undefined, checks: Checks): Answer {
+  if (ship.choice !== 'production') return ship
+  const broken = CHECKS.filter(c => checks[c] === 'failed')
+  const lowered = (why: string): Answer => ({ ...ship, choice: 'development', note: `production gated: ${why}` })
+  if (broken.length > 0) return lowered(`observed ${broken.join(', ')} failed`)
+  const v = verification?.choice
+  if (v === 'complete') return ship
+  if (v === 'incomplete') return lowered('verification incomplete')
+  return {
+    choice: 'review',
+    source: ship.source,
+    suggested: { choice: 'production', by: ship.source, confidence: ship.source === 'jev' ? ship.confidence : undefined },
+    note: v === 'unknown' ? 'verification unknown' : 'verification not settled',
+  }
 }
 
 /** One evaluation as toast words: its choice, and its confidence or who answered. */
 function said(look: Look, a: Answer) {
   if (a.choice === 'review') return `${look.words} (${detail(a).slice(3)})`
-  return `${look.words}${a.source === 'jev' && typeof a.confidence === 'number' ? ` (${pct(a.confidence)})` : detail(a)}`
+  const why = a.note ? ` · ${a.note}` : ''
+  return a.source === 'jev' && typeof a.confidence === 'number' ? `${look.words} (${pct(a.confidence)})${why}` : `${look.words}${detail(a)}`
 }
 
 /** A boolean option, or undefined when unset (an unset field arrives as an empty string). */
@@ -528,7 +576,7 @@ export const register: Register = (on, options) => {
   const shipCheck = booleanOption(options.ship_check) ?? booleanOption(options.deploy_check)
   const settings: Settings = {
     apiKey: options.api_key,
-    questions: shipCheck === false ? ['status'] : ['status', 'ship'],
+    questions: shipCheck === false ? ['status'] : ['status', 'ship', 'verification'],
     taskBelow: numberOption(options.task_below) ?? below,
     shipBelow,
     productionBelow: numberOption(options.production_below) ?? shipBelow,

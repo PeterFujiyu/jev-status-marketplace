@@ -1,7 +1,7 @@
 {
   "name": "jev-status",
-  "version": "0.7.1",
-  "description": "After each turn asks TypeSafe Jev two independent questions, where the task stands (done, needaction, failed) and the highest safe delivery level of the session's current active work (production, development, blocked, na), with Claude as a second opinion and a fail-closed 'needs review' for ship, and shows both above the prompt",
+  "version": "0.8.0",
+  "description": "After each turn asks TypeSafe Jev where the task stands (done, needaction, failed) and the highest safe delivery level of the session's active work (production, development, blocked, na), gated by an internal verification check so production needs verification complete; Claude gives second opinions, unsettled answers fail closed, and both rows show above the prompt",
   "author": {
     "name": "peter"
   },
@@ -23,7 +23,7 @@
     "ship_check": {
       "type": "boolean",
       "title": "Ship check",
-      "description": "Also ask the highest safe delivery level of the session's current active work: production, development, blocked, or n/a. On unless turned off here (or under 0.6's Deploy check, when this is left unset)."
+      "description": "Also ask the highest safe delivery level of the session's current active work (production, development, blocked, n/a), and the internal verification check that gates production. On unless turned off here (or under 0.6's Deploy check, when this is left unset)."
     },
     "claude_below": {
       "type": "number",
@@ -40,7 +40,7 @@
     "ship_below": {
       "type": "number",
       "title": "Ship threshold (%)",
-      "description": "Overrides 'Ask Claude below' for the ship question. Leave empty to use it.",
+      "description": "Overrides 'Ask Claude below' for the ship and verification questions. Leave empty to use it.",
       "required": false
     },
     "production_below": {

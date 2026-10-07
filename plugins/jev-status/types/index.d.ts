@@ -7,8 +7,14 @@ export type Status = 'done' | 'needaction' | 'failed'
  */
 export type Ship = 'production' | 'development' | 'blocked' | 'na'
 
-/** The two evaluations made after each turn (`status` is the task row). */
-export type Question = 'status' | 'ship'
+/**
+ * Whether the verification the session's active work needs is all done. An
+ * internal gate on ship's production answer; never drawn as a row of its own.
+ */
+export type Verification = 'complete' | 'incomplete' | 'unknown'
+
+/** The evaluations made after each turn (`status` is the task row; `verification` gates ship). */
+export type Question = 'status' | 'ship' | 'verification'
 
 /** A verification the plugin can see the agent run. */
 export type Check = 'tests' | 'build' | 'typecheck' | 'lint'
@@ -33,12 +39,19 @@ export type Answer<C extends string = string> = {
   error?: string
   /** For `review`: the answer that was not trusted, and by whom. */
   suggested?: { choice: string; by: 'jev' | 'claude'; confidence?: number }
-  /** For `review`: why it was not trusted, when not low confidence (`observed tests failed`). */
+  /**
+   * Why the answer is not what was suggested: for `review`, why it was not trusted, when not low
+   * confidence; for a ship answer the verification gate lowered, why (`production gated: …`).
+   */
   note?: string
 }
 
-/** The verdict on the last turn; `ship` is absent when that check is off. */
-export type Verdict = { status: Answer<Status>; ship?: Answer<Ship | 'review'> }
+/** The verdict on the last turn; `ship` and `verification` are absent when that check is off. */
+export type Verdict = {
+  status: Answer<Status>
+  ship?: Answer<Ship | 'review'>
+  verification?: Answer<Verification | 'review'>
+}
 
 /** running: a turn is in progress; checking: it ended and no verdict is in yet. */
 export type Phase = 'idle' | 'running' | 'checking'

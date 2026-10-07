@@ -11,6 +11,11 @@ JEV ship: ▲ production 91%
 
 ```
 JEV task: ✔ done 95%
+JEV ship: ◆ development 92% · production gated: verification incomplete
+```
+
+```
+JEV task: ✔ done 95%
 JEV ship: ? needs review · Jev suggested production 35%
 ```
 
@@ -37,6 +42,29 @@ are needed, so work can be production-ready while the agent waits for your go-ah
 | – n/a | genuinely no active deliverable work in the session: questions, research, explanation, planning, conversation |
 | ? needs review | the plugin's own state, never one of Jev's choices: no one could settle the ship answer with enough confidence, or the plugin saw a check fail that contradicts `production` |
 
+### The verification gate
+
+Behind the ship row there is a third, internal question, never drawn as a row of its own:
+**verification**, whether all the verification the active work needs is done: `complete`,
+`incomplete` (a relevant test, manual, runtime, integration, environment or compatibility check is
+still pending, unchecked, not run or left manual), or `unknown`. Implementation complete does not
+mean production ready. The rubric tells Jev and Claude that wording like *still manual*,
+*unchecked*, *not tested*, *not run*, *pending verification*, *needs validation*, *requires manual
+testing* or *open checks* means `incomplete`; the plugin itself matches no keywords.
+
+After all reviews, the plugin applies the gate to the ship answer:
+
+| ship | verification | shown |
+|---|---|---|
+| production | complete | ▲ production |
+| production | incomplete | ◆ development · production gated: verification incomplete |
+| production | unknown, or not settled by a review | ? needs review · … but verification unknown / not settled |
+| production | (a check the plugin saw fail this turn) | ◆ development · production gated: observed tests failed |
+| development / blocked / n/a | any | unchanged |
+
+So the session-context review can recover context from earlier turns, but it can't lift work to
+`production` on its own: verification has to be `complete` as well.
+
 **`production` means technical readiness only.** It does not replace CI, code review, branch
 protection, approvals or your release policy, and the plugin never pushes or deploys anything.
 
@@ -60,20 +88,26 @@ protection, approvals or your release policy, and the plugin never pushes or dep
    - or Jev failed and the fallback is on.
 
    The current-turn summary can't show work from earlier turns, so it is skipped for ship.
+4. **verification** goes to the session-context review with ship whenever ship does, and on its own
+   when Jev's ship answer is `production` and Jev is unsure of verification (or the turn delivered
+   work). When ship isn't `production`, verification can't change what is shown, so it isn't
+   reviewed.
 
 The **session-context review** is the session's own model, asked to judge the latest active work
 across the session as Claude Code holds it at that moment. Claude Code may have already compacted
 the conversation, so this review sees the summary and the turns kept since, not necessarily every
-earlier detail. It is a second look with more context, not a lossless record. When both questions
-need it, one review answers both. It may answer `unclear`.
+earlier detail. It is a second look with more context, not a lossless record. When several
+questions need it, one review answers them all. It may answer `unclear`. It is also the same model
+that did the work, reviewing itself; its prompt asks it to judge verification as strictly as an
+outside reviewer would, and the verification gate above holds whatever it answers.
 
 When no one can settle a question (with Claude's review turned on; a threshold of 0 opts out of
 reviews, delivery turns included, and Jev's answer then shows as given, even a low-confidence
 `production`):
 
 - **task** keeps Jev's low-confidence answer, shown with its percentage.
-- **ship** fails closed: it shows `? needs review` with what Jev suggested, never a low-confidence
-  green `production`. The same happens when the review fails or times out, and on the two kinds
+- **ship** and **verification** fail closed: ship shows `? needs review` with what Jev suggested,
+  never a low-confidence green `production`; an unsettled verification counts as not complete. The same happens when the review fails or times out, and on the two kinds
   of turn above (delivery, n/a after active work), whatever Jev's confidence was.
 
 A Jev error (HTTP failure, invalid JSON, malformed answer) with no Claude answer shows as
@@ -86,7 +120,8 @@ The plugin watches the Bash commands the agent runs during the turn and records 
 `pytest`, `cargo build`, `tsc`, `eslint`). These are observations, kept apart from what the agent
 claims in its final message, and are sent to Jev and the summary review as such. If the plugin saw
 a check fail (its latest run in the turn) and the answer is `production`, the ship row shows
-`? needs review · …, but observed tests failed` instead.
+`◆ development · production gated: observed tests failed` instead. A passing check alone never
+makes verification `complete`.
 
 Limits, chosen so that an observation errs towards `unknown` rather than `passed`:
 
@@ -139,10 +174,10 @@ Without a key nothing goes to TypeSafe; Claude judges each turn instead (unless 
 |---|---|---|
 | TypeSafe API key | empty | see above |
 | Toast each verdict | on | also show each verdict as a toast |
-| Ship check | on | also ask the ship question; off shows only the task row. Left unset, 0.6's *Deploy check* applies |
+| Ship check | on | also ask the ship and verification questions; off shows only the task row. Left unset, 0.6's *Deploy check* applies |
 | Ask Claude below (% Jev confidence) | 70 | below this, Claude gives a second opinion on that answer; used for both questions unless overridden below; 0 never asks (delivery turns included) |
 | Task threshold (%) | empty | overrides the above for the task question |
-| Ship threshold (%) | empty | overrides the above for the ship question. Left unset, 0.6's *Deploy threshold* applies |
+| Ship threshold (%) | empty | overrides the above for the ship and verification questions. Left unset, 0.6's *Deploy threshold* applies |
 | Production threshold (%) | empty | a stricter threshold for a `production` answer from Jev; applies only when higher than the ship threshold |
 | Claude's view | summary-then-conversation | for the **task** question: `summary`: only the quick review of what Jev read. `summary-then-conversation`: the same, then the session-context review when the summary isn't enough. `conversation`: always the session-context review. The ship question always uses the session-context review |
 | Claude review model | haiku | model for the summary review: an alias (`haiku`, `sonnet`, `opus`) or a full model id. The session-context review always uses the session's own model, which lets it reuse the prompt cache |

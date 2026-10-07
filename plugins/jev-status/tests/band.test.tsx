@@ -24,12 +24,18 @@ type State = {
   observed_checks: Record<string, string>
 }
 
-const jevSays = (status: string, confidence: number, ship: [string, number] = ['production', 0.9]): JevReply => ({
+const jevSays = (
+  status: string,
+  confidence: number,
+  ship: [string, number] = ['production', 0.9],
+  verification: [string, number] = ['complete', 0.95],
+): JevReply => ({
   status: 200,
   body: {
     answers: {
       status: { type: 'choice', choice: status, confidence },
       ship: { type: 'choice', choice: ship[0], confidence: ship[1] },
+      verification: { type: 'choice', choice: verification[0], confidence: verification[1] },
     },
   },
 })
@@ -181,7 +187,8 @@ test('a confident Jev answers both questions alone', { options: KEY }, async ($,
     tool_error_count: 0,
     observed_checks: { tests: 'unknown', build: 'unknown', typecheck: 'unknown', lint: 'unknown' },
   })
-  expect(Object.keys(b.questions)).toEqual(['status', 'ship'])
+  expect(Object.keys(b.questions)).toEqual(['status', 'ship', 'verification'])
+  expect(Object.keys(b.questions.verification.criteria)).toEqual(['complete', 'incomplete', 'unknown'])
   expect(Object.keys(b.questions.status.criteria)).toEqual(['done', 'needaction', 'failed'])
   expect(Object.keys(b.questions.ship.criteria)).toEqual(['production', 'development', 'blocked', 'na'])
   expect(b.questions.status.instructions).toContain('may have resolved them later')
@@ -368,10 +375,10 @@ test('"yes, push it" after earlier work is judged as that work, not n/a', { opti
   // This turn has no edits of its own; Jev, seeing only it, leans n/a without confidence.
   replies.jev = jevSays('done', 0.97, ['na', 0.4])
   const outcomes: [string, string][] = [
-    ['ship: production', '▲ production · Claude, session context (Jev 40%)'],
-    ['ship: development', '◆ development · Claude, session context (Jev 40%)'],
-    ['ship: blocked', '■ blocked · Claude, session context (Jev 40%)'],
-    ['ship: unclear', '? needs review · Jev suggested na 40%'],
+    ['ship: production\nverification: complete', '▲ production · Claude, session context (Jev 40%)'],
+    ['ship: development\nverification: incomplete', '◆ development · Claude, session context (Jev 40%)'],
+    ['ship: blocked\nverification: incomplete', '■ blocked · Claude, session context (Jev 40%)'],
+    ['ship: unclear\nverification: complete', '? needs review · Jev suggested na 40%'],
   ]
   for (const [reply, shown] of outcomes) {
     replies.session = reply
@@ -396,7 +403,7 @@ test('"yes, push it" after earlier work is judged as that work, not n/a', { opti
 })
 
 test('a turn that delivers work sends ship to the session context even when Jev is sure', { options: KEY }, async ($, on) => {
-  const { replies, forks, clock } = world(on, jevSays('done', 0.98, ['development', 0.99]), 'unused', 'ship: production')
+  const { replies, forks, clock } = world(on, jevSays('done', 0.98, ['development', 0.99]), 'unused', 'ship: production\nverification: complete')
   const turn = (bash: string[]) => runTurn($, { prompt: 'push it', bash, answer: 'Done, pushed.' })
 
   // Jev sees only this turn, so it is sure of development; the session context shows the earlier verification.
@@ -418,8 +425,7 @@ test('a turn that delivers work sends ship to the session context even when Jev 
   await clock.settle()
   await expectBand($, '? needs review · Jev suggested na 97%')
   replies.jev = jevSays('done', 0.98, ['development', 0.99])
-
-  replies.session = 'ship: production'
+  replies.session = 'ship: production\nverification: complete'
   for (const command of ['git -C /repo push', 'git -c http.extraHeader=x --no-pager push origin main', 'git --git-dir .git --work-tree . merge feat', 'gh pr merge 42 --squash', 'cd app && git push -u origin feat', 'npm publish', 'GIT_TRACE=1 git push 2>&1 | tail -3', 'terraform apply -auto-approve', 'git merge feat FAIL']) {
     const before = forks.length
     await turn([command])
@@ -435,7 +441,7 @@ test('a turn that delivers work sends ship to the session context even when Jev 
 })
 
 test('an n/a right after a turn with active work is reviewed, even when Jev is sure', { options: KEY }, async ($, on) => {
-  const { replies, forks, clock } = world(on, jevSays('done', 0.95, ['production', 0.92]), 'unused', 'ship: production')
+  const { replies, forks, clock } = world(on, jevSays('done', 0.95, ['production', 0.92]), 'unused', 'ship: production\nverification: complete')
   await runTurn($, { prompt: 'Fix the login bug.', bash: ['npm test'], answer: 'Fixed; tests pass.' })
   await clock.settle()
   expect(forks.length).toBe(0)
@@ -489,6 +495,153 @@ test('an unsure task and ship share one session-context review', { options: KEY 
   await expectBand($, 'failed · Claude, session context (Jev 50%)', 'blocked · Claude, session context (Jev 30%)')
 })
 
+// ——— Verification gate ———
+
+test('production needs verification complete', { options: KEY }, async ($, on) => {
+  const { replies, completes, forks, toasts, clock } = world(on, jevSays('done', 0.95, ['production', 0.92], ['complete', 0.9]))
+  const turn = async (answer: string) => {
+    await runTurn($, { prompt: 'Add the export button.', answer })
+    await clock.settle()
+  }
+
+  // 1. Implementation complete, all relevant checks passed: production stands.
+  await turn('Added the export button; unit and e2e tests pass and the build is green.')
+  await expectBand($, 'JEV ship: ▲ production 92%')
+
+  // 2. One manual runtime check remains: development, not production.
+  replies.jev = jevSays('done', 0.95, ['production', 0.92], ['incomplete', 0.88])
+  await turn('Added the export button; tests pass. Still manual: checking the download in Safari.')
+  await expectBand($, 'JEV ship: ◆ development 92% · production gated: verification incomplete')
+  expect(toasts.at(-1)).toBe('done (95%) · ship: development (92%) · production gated: verification incomplete')
+
+  // 3. Integration/runtime verification unchecked: development.
+  replies.jev = jevSays('done', 0.95, ['production', 0.9], ['incomplete', 0.93])
+  await turn('Implemented the S3 upload. Unit tests pass; integration against the real bucket is unchecked.')
+  await expectBand($, '◆ development 90% · production gated: verification incomplete')
+  for (const surface of SURFACES) expect(await bandText($, surface)).not.toContain('▲')
+  expect(completes.length + forks.length).toBe(0)
+})
+
+test('the session context may confirm production, but not past incomplete verification', { options: KEY }, async ($, on) => {
+  // 4. Jev: production, unsure. The session context says production, but verification incomplete.
+  const { forks, clock } = world(
+    on,
+    jevSays('done', 0.95, ['production', 0.45], ['incomplete', 0.5]),
+    'unused',
+    'ship: production\nverification: incomplete',
+  )
+  await runTurn($, { answer: 'Done. Requires manual testing on a real device before release.' })
+  await clock.settle()
+
+  expect(forks.length).toBe(1)
+  expect(forks[0]).toContain('verification: <choice>')
+  expect(forks[0]).toContain('including for work you did yourself')
+  await expectBand($, '◆ development · Claude, session context (Jev 45%) · production gated: verification incomplete')
+})
+
+test('verification still unknown after the review is never green production', { options: KEY }, async ($, on) => {
+  // 5. Jev unsure of verification; the session context can't tell either.
+  const { replies, forks, clock } = world(
+    on,
+    jevSays('done', 0.95, ['production', 0.95], ['unknown', 0.4]),
+    'unused',
+    'verification: unclear',
+  )
+  await runTurn($)
+  await clock.settle()
+  expect(forks.length).toBe(1)
+  expect(forks[0]).not.toContain('ship: <choice>') // ship was confident; only verification is reviewed
+  await expectBand($, '? needs review · Jev suggested production 95%, but verification not settled')
+
+  // A confident unknown needs no review, and still isn't production.
+  replies.jev = jevSays('done', 0.95, ['production', 0.95], ['unknown', 0.9])
+  await runTurn($)
+  await clock.settle()
+  expect(forks.length).toBe(1)
+  await expectBand($, '? needs review · Jev suggested production 95%, but verification unknown')
+
+  // Nor is a failed review.
+  replies.jev = jevSays('done', 0.95, ['production', 0.95], ['unknown', 0.4])
+  replies.session = 'refuse'
+  await runTurn($)
+  await clock.settle()
+  await expectBand($, '? needs review · Jev suggested production 95%, but verification not settled')
+  for (const surface of SURFACES) expect(await bandText($, surface)).not.toContain('▲')
+})
+
+test('the gate only touches production', { options: KEY }, async ($, on) => {
+  const { replies, clock } = world(on, jevSays('done', 0.95))
+  const cases: [[string, number], [string, number], string][] = [
+    // 6. Pure research: n/a whatever verification says.
+    [['na', 0.97], ['unknown', 0.9], '– n/a 97%'],
+    [['blocked', 0.9], ['complete', 0.9], '■ blocked 90%'],
+    [['blocked', 0.9], ['incomplete', 0.9], '■ blocked 90%'],
+    [['development', 0.9], ['unknown', 0.9], '◆ development 90%'],
+    [['development', 0.9], ['complete', 0.9], '◆ development 90%'],
+  ]
+  for (const [ship, verification, shown] of cases) {
+    replies.jev = jevSays('done', 0.95, ship, verification)
+    await runTurn($, { prompt: 'What is a monad?', answer: 'A monad is …' })
+    await clock.settle()
+    await expectBand($, `JEV ship: ${shown}`)
+    for (const surface of SURFACES) expect(await bandText($, surface)).not.toContain('gated')
+  }
+})
+
+test('an unsure verification is only reviewed when it could gate production', { options: KEY }, async ($, on) => {
+  const { replies, completes, forks, clock } = world(on, jevSays('done', 0.95, ['na', 0.97], ['unknown', 0.4]), 'unused', 'verification: complete')
+  for (const ship of [['na', 0.97], ['development', 0.9], ['blocked', 0.9]] as [string, number][]) {
+    replies.jev = jevSays('done', 0.95, ship, ['unknown', 0.4])
+    await runTurn($, { prompt: 'How does the cache work?', answer: 'It keys on the request hash.' })
+    await clock.settle()
+  }
+  expect(completes.length + forks.length).toBe(0)
+
+  replies.jev = jevSays('done', 0.95, ['production', 0.95], ['unknown', 0.4])
+  await runTurn($)
+  await clock.settle()
+  expect(forks.length).toBe(1)
+  await expectBand($, '▲ production 95%')
+})
+
+test('verification goes to the session context with ship', { options: KEY }, async ($, on) => {
+  // Ship unsure, verification confident: both are reviewed, so the gate weighs like with like.
+  const { forks, clock } = world(
+    on,
+    jevSays('done', 0.95, ['production', 0.5], ['complete', 0.95]),
+    'unused',
+    'ship: production\nverification: incomplete',
+  )
+  await runTurn($)
+  await clock.settle()
+
+  expect(forks.length).toBe(1)
+  expect(forks[0]).toContain('ship: <choice>')
+  expect(forks[0]).toContain('verification: <choice>')
+  await expectBand($, '◆ development · Claude, session context (Jev 50%) · production gated: verification incomplete')
+})
+
+test('the verification rubric names pending checks, for Jev and the session context', { options: KEY }, async ($, on) => {
+  const { body, completes, forks, clock } = world(
+    on,
+    jevSays('done', 0.5, ['production', 0.5], ['unknown', 0.5]),
+    'status: unclear',
+    'status: done\nship: production\nverification: complete',
+  )
+  await runTurn($)
+  await clock.settle()
+
+  const phrases = ['still manual', 'unchecked', 'not tested', 'not run', 'pending verification', 'needs validation', 'requires manual testing', 'open checks']
+  const criteria = body().questions.verification.criteria.incomplete as string
+  for (const phrase of phrases) {
+    expect(criteria).toContain(phrase)
+    expect(forks[0]).toContain(phrase)
+  }
+  expect(body().questions.verification.instructions).toContain('Implementation complete does not mean verified.')
+  expect(completes[0]!.system).not.toContain('verification: <choice>') // the summary review only takes the task
+  await expectBand($, '▲ production · Claude, session context (Jev 50%)')
+})
+
 // ——— Reading Claude's replies ———
 
 test('reviewer replies are read strictly, per line', { options: KEY }, async ($, on) => {
@@ -515,14 +668,12 @@ test('reviewer replies are read strictly, per line', { options: KEY }, async ($,
 })
 
 test('a bare one-word reply answers a lone question', { options: KEY }, async ($, on) => {
-  const { clock } = world(on, jevSays('done', 0.95, ['production', 0.4]), 'unused', 'Development.')
+  const { clock } = world(on, jevSays('done', 0.4, ['production', 0.95]), 'Failed.')
   await runTurn($)
   await clock.settle()
 
-  await expectBand($, 'development · Claude, session context (Jev 40%)')
+  await expectBand($, 'failed · Claude (Jev 40%)')
 })
-
-// ——— Thresholds ———
 
 test(
   'the generic threshold and the review model are configurable',
@@ -880,15 +1031,13 @@ test('tool results that outlive their turn are not counted in the next', { optio
   expect(state.tool_errors).toEqual([])
 })
 
-test('production cannot stand against a check seen failing', { options: KEY }, async ($, on) => {
+test('a check seen failing lowers production to development', { options: KEY }, async ($, on) => {
   const { toasts, clock } = world(on, jevSays('done', 0.95, ['production', 0.95]))
   await runTurn($, { bash: ['npm test FAIL'], answer: 'Done; ready to ship.' })
   await clock.settle()
 
-  await expectBand($, '? needs review · Jev suggested production 95%, but observed tests failed')
-  expect(toasts).toEqual([
-    'done (95%) · ship: needs review (Jev suggested production 95%, but observed tests failed)',
-  ])
+  await expectBand($, '◆ development 95% · production gated: observed tests failed')
+  expect(toasts).toEqual(['done (95%) · ship: development (95%) · production gated: observed tests failed'])
 })
 
 // ——— Options and state ———
@@ -922,7 +1071,7 @@ test('ship_check set wins over 0.6\'s deploy_check', { options: { ...KEY, deploy
   const { body, clock } = world(on, jevSays('done', 0.95))
   await runTurn($)
   await clock.settle()
-  expect(Object.keys(body().questions)).toEqual(['status', 'ship'])
+  expect(Object.keys(body().questions)).toEqual(['status', 'ship', 'verification'])
 })
 
 test('deploy_below from 0.6 applies while ship_below is unset', { options: { ...KEY, deploy_below: 50 } }, async ($, on) => {
