@@ -700,6 +700,19 @@ async function takeUpSession($: EngineInterface, live: Live, keepTurn: boolean, 
   await restoreKept($, live, keepTurn)
 }
 
+/**
+ * Takes up a session switch (/resume, /clear in this process) that the band has not drawn yet: the
+ * band's draw is only one place it is noticed, and it may not have come by the time of a command or
+ * a prompt.
+ */
+async function syncSession($: EngineInterface, live: Live, keepTurn: boolean) {
+  const id = await $.session.id()
+  if (id === live.sessionId) return
+  const first = live.sessionId === null
+  live.sessionId = id
+  if (!first) await takeUpSession($, live, keepTurn, id, live.epoch)
+}
+
 /** Drops a judgement in flight, and what the next turn and the retry button would take from this session. */
 function forgetSession(live: Live) {
   live.epoch += 1
@@ -831,15 +844,22 @@ export const register: Register = (on, options) => {
     return ended
   })
 
-  // /jev waits for a running turn to end, so it judges that turn once it has.
+  // /jev waits for a running turn to end, so it judges that turn once it has. Claude Code names the
+  // plugin before its output.
   on('command.run', { command: 'jev' }, async $ => {
-    const turn = live.lastTurn
-    if (turn === null) return { text: 'jev-status: no finished turn to judge yet.' }
+    await syncSession($, live, keepTurn).catch(() => {})
+    // The turn in memory, or else the one kept for this session (a load that took nothing up).
+    const kept = live.lastTurn === null && keepTurn ? await loadKept($).catch(() => null) : null
+    const turn = live.lastTurn ?? kept?.turn ?? null
+    if (turn === null) return { text: 'no finished turn to judge yet.' }
+    live.lastTurn = turn
     await startJudging($, live, settings, toast, keepTurn, turn, true)
-    return { text: 'jev-status: judging the last turn…' }
+    return { text: 'judging the last turn…' }
   })
 
   on('prompt.submit', async ($, e, next) => {
+    // A switched session's turn must not be judged with the session it left (activeBefore).
+    await syncSession($, live, keepTurn).catch(() => {})
     live.epoch += 1
     turnNo += 1
     // A background task's notification starts a turn too, but the request stays the user's last.

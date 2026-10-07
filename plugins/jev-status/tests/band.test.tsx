@@ -1221,14 +1221,14 @@ test('/jev is registered and judges the last finished turn once', { options: KEY
   const { commands, sent, replies, clock } = world(on, jevSays('done', 0.95, ['production', 0.91]))
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
   expect(commands).toEqual(['jev'])
-  expect((await jev($)).text).toBe('jev-status: no finished turn to judge yet.')
+  expect((await jev($)).text).toBe('no finished turn to judge yet.')
   expect(sent.length).toBe(0)
 
   await runTurn($)
   await clock.settle()
   expect(sent.length).toBe(1)
   replies.jev = jevSays('done', 0.95, ['development', 0.88])
-  expect((await jev($)).text).toBe('jev-status: judging the last turn…')
+  expect((await jev($)).text).toBe('judging the last turn…')
   await expectBand($, 'checking')
   await clock.settle()
   expect(sent.length).toBe(2)
@@ -1242,7 +1242,7 @@ test('/jev after an interrupted turn has nothing to judge', { options: KEY }, as
   await clock.settle()
   await runTurn($, { reason: 'aborted' })
   await clock.settle()
-  expect((await jev($)).text).toBe('jev-status: no finished turn to judge yet.')
+  expect((await jev($)).text).toBe('no finished turn to judge yet.')
   expect(sent.length).toBe(1)
 })
 
@@ -1303,6 +1303,59 @@ test('with judging off and no button, /jev still judges a resumed session\'s tur
   await jev($)
   await clock.settle()
   expect(JSON.parse(sent[0]!.init?.body ?? '{}').state.user_request).toBe('Ship the fix.')
+})
+
+test('/jev takes up a /resume the band has not drawn yet', { options: KEY }, async ($, on) => {
+  const { sent, clock, session } = world(on, jevSays('done', 0.95), undefined, undefined, undefined, {
+    'session:sess-2': keptAt(5),
+  })
+  await $.session.start(START)
+  await runTurn($)
+  await clock.settle()
+  await $.session.end({ reason: 'resume', sessionId: 'sess-1', resume: { id: 'sess-1' } })
+  await clock.settle()
+  session.id = 'sess-2'
+  // No draw since the switch.
+  expect((await jev($)).text).toBe('judging the last turn…')
+  await clock.settle()
+  expect(JSON.parse(sent.at(-1)!.init?.body ?? '{}').state.user_request).toBe('Ship the fix.')
+})
+
+test('/jev never judges the turn of a session it was switched away from', { options: KEY }, async ($, on) => {
+  const { sent, clock, session } = world(on, jevSays('done', 0.95), undefined, undefined, undefined, {
+    'session:sess-2': keptAt(5),
+  })
+  await $.session.start(START)
+  await runTurn($)
+  await clock.settle()
+  // A switch with no session.end and no draw since.
+  session.id = 'sess-2'
+  await jev($)
+  await clock.settle()
+  expect(JSON.parse(sent.at(-1)!.init?.body ?? '{}').state.user_request).toBe('Ship the fix.')
+})
+
+test('/jev falls back to the turn kept for the session', { options: KEY }, async ($, on) => {
+  // Loaded with no session.start to take anything up.
+  const { sent, clock } = world(on, jevSays('done', 0.95), undefined, undefined, undefined, { 'session:sess-1': keptAt(5) })
+  expect((await jev($)).text).toBe('judging the last turn…')
+  await clock.settle()
+  expect(JSON.parse(sent[0]!.init?.body ?? '{}').state.user_request).toBe('Ship the fix.')
+})
+
+test('a prompt takes up a switch the band has not drawn: the turn is judged with its own session', { options: KEY }, async ($, on) => {
+  const { replies, forks, clock, session } = world(on, jevSays('done', 0.95, ['production', 0.95]), undefined, undefined, undefined, {
+    'session:sess-2': { ...keptAt(5, 'na'), activeBefore: false },
+  })
+  await $.session.start(START)
+  await runTurn($)
+  await clock.settle()
+  session.id = 'sess-2'
+  replies.jev = jevSays('done', 0.95, ['na', 0.95])
+  // sess-1's last answer had active work; sess-2's did not, so a sure n/a here needs no review.
+  await runTurn($, { prompt: 'What is a monad?', answer: 'A monoid in the category of endofunctors.' })
+  await clock.settle()
+  expect(forks.length).toBe(0)
 })
 
 // ——— Cost saving ———
@@ -1475,7 +1528,7 @@ test('a resumed session with nothing kept, or something unreadable, draws nothin
   await expectNoBand($)
   for (const surface of SURFACES) expect(await retryButton($, surface)).toBeUndefined()
   // Its turn is not taken up either.
-  expect((await jev($)).text).toBe('jev-status: no finished turn to judge yet.')
+  expect((await jev($)).text).toBe('no finished turn to judge yet.')
 })
 
 test('a kept turn of another shape is not retried', { options: KEY }, async ($, on) => {
