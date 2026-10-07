@@ -1,0 +1,11 @@
+{
+  "name": "peter-plugins",
+  "owner": { "name": "peter" },
+  "plugins": [
+    {
+      "name": "jev-status",
+      "source": "./plugins/jev-status",
+      "description": "Shows TypeSafe Jev's done / needaction / failed verdict for the last turn above the prompt"
+    }
+  ]
+}

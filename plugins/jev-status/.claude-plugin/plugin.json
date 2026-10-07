@@ -1,0 +1,7 @@
+{
+  "name": "jev-status",
+  "version": "0.1.0",
+  "description": "Shows TypeSafe Jev's done / needaction / failed verdict for the last turn above the prompt",
+  "author": { "name": "peter" },
+  "types": "./types/index.d.ts"
+}
