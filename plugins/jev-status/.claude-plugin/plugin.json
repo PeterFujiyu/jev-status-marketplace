@@ -1,6 +1,6 @@
 {
   "name": "jev-status",
-  "version": "0.8.8",
+  "version": "0.8.9",
   "description": "After each turn asks TypeSafe Jev where the task stands (done, needaction, failed) and the highest safe delivery level of the session's active work (production, development, blocked, na), gated by an internal verification check so production needs verification complete; Claude gives second opinions, unsettled answers fail closed, and both rows show above the prompt",
   "author": {
     "name": "peter"

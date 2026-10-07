@@ -1413,6 +1413,29 @@ test('cost saving holds for delivery turns and verification too', { options: { .
   await expectBand($, '▲ production 95%')
 })
 
+test('cost saving with no Jev answer leaves ship pending, not missing or a plain error', { options: { cost_saving: 'on' } }, async ($, on) => {
+  // No key: Claude's summary answers the task; ship would need the session context, which is skipped.
+  const { forks, clock } = world(on, jevSays('done', 0.95), 'status: done', 'ship: production\nverification: complete')
+  await runTurn($)
+  await clock.settle()
+  expect(forks.length).toBe(0)
+  await expectBand($, 'JEV task: ', '✔ done · Claude (no Jev key)', `JEV ship: ? needs review · no Jev key, ${SAVING_NOTE}`)
+
+  // /jev runs the review it skipped.
+  await jev($)
+  await clock.settle()
+  expect(forks.length).toBe(1)
+  await expectBand($, '▲ production · Claude, session context (no Jev key)')
+})
+
+test('cost saving with a Jev error keeps the error and says ship is pending', { options: { ...KEY, cost_saving: 'on' } }, async ($, on) => {
+  const { forks, clock } = world(on, { status: 503, body: {} }, 'status: done')
+  await runTurn($)
+  await clock.settle()
+  expect(forks.length).toBe(0)
+  await expectBand($, `JEV ship: ? needs review · Jev HTTP 503, ${SAVING_NOTE}`)
+})
+
 test('cost saving uses the summary for the task whatever the view', { options: { ...KEY, cost_saving: 'on', claude_view: 'conversation' } }, async ($, on) => {
   const { forks, completes, clock } = world(on, jevSays('done', 0.4, ['development', 0.95]), 'status: needaction')
   await runTurn($)

@@ -565,6 +565,10 @@ async function judge($: EngineInterface, s: Settings, turn: Turn, manual: boolea
         suggested: { choice: j.choice, by: 'jev', confidence: j.confidence },
         note: saving ? SKIPPED : undefined,
       }
+    } else if (saving && q !== 'status' && toClaude.includes(q)) {
+      // Jev gave nothing and cost saving skipped Claude: the question is pending, not just failed.
+      const why = j.choice === 'nokey' ? 'no Jev key' : `Jev ${j.error ?? 'error'}`
+      answers[q] = { choice: 'review', source: 'jev', error: why, note: `${why}, ${SKIPPED}` }
     } else {
       answers[q] = j // the task row keeps Jev's answer; a failed ship row stays an error
     }
