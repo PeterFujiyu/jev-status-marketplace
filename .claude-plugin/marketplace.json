@@ -6,7 +6,8 @@
     {
       "name": "jev-status",
       "source": "./plugins/jev-status",
-      "description": "Shows TypeSafe Jev's done / needaction / failed verdict for the last turn above the prompt"
+      "description": "Asks TypeSafe Jev whether each turn left the task done, needaction or failed, and shows the verdict above the prompt",
+      "version": "0.2.0"
     }
   ]
 }

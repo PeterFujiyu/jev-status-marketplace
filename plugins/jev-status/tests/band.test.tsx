@@ -1,8 +1,8 @@
 import { expect, mock, test } from 'claude-code/testing'
-import type { On } from 'claude-code'
+import type { Engine } from 'claude-code/testing'
+import type { HttpInit, On } from 'claude-code'
 
 const SURFACES = ['terminal', 'desktop'] as const
-const STATUS_FILE = '/h/.claude/jev-status/sid.json'
 const PROPS = {
   hasSurvey: false,
   isWorking: false,
@@ -12,72 +12,101 @@ const PROPS = {
   view: {},
 }
 
-// The engine beneath the plugin: a session id, a file system in memory, and
-// pass-through answers for the events the mod hooks.
-function world(on: On, files: Record<string, string>) {
+type Sent = { url: string; init?: HttpInit }
+
+// The engine beneath the plugin: no key in the environment, TypeSafe answering
+// with `reply`, and pass-through answers for the events the plugin hooks.
+function world(on: On, reply: { status: number; body: unknown }) {
+  const sent: Sent[] = []
+  const clock = mock.clock(on, { now: 1_800_000_000_000 })
   mock.env(on, { HOME: '/h' })
-  on('session.id', () => ({ value: 'sid' }))
-  on('fs.exists', (_$, e) => ({ value: e.path in files }))
-  on('fs.read', (_$, e) => {
-    const text = files[e.path]
-    if (text === undefined) throw new Error(`no such file: ${e.path}`)
-    return { value: text }
+  on('fs.exists', () => ({ value: false }))
+  on('http.fetch', (_$, e) => {
+    sent.push(e)
+    return {
+      value: { status: reply.status, ok: reply.status < 300, headers: {}, text: JSON.stringify(reply.body) },
+    }
   })
-  on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('prompt.submit', (_$, e) => ({ text: e.text }))
   on('turn.complete', (_$, e) => ({ text: e.answer }))
   on('ui.render', ($, e) => {
     const { Box } = $.ui.resolve(e)
     return <Box />
   })
+  return { sent, clock }
 }
 
-const turn = (reason: 'answer' | 'aborted') => ({
-  answer: 'ok',
-  durationMs: 1,
-  isAborted: reason === 'aborted',
-  turnId: 't1',
-  reason,
+async function runTurn($: Engine, reason: 'answer' | 'aborted' = 'answer') {
+  await $.prompt.submit({ text: 'Deploy the app to staging.', wait: false, origin: { kind: 'composer' } })
+  await $.turn.complete({
+    answer: 'Which AWS profile should I use, staging-admin or staging-ci?',
+    durationMs: 1,
+    isAborted: reason === 'aborted',
+    turnId: 't1',
+    reason,
+  })
+}
+
+async function bandText($: Engine, surface: (typeof SURFACES)[number]) {
+  const band = await $.ui.mount({ plugin: 'jev-status', surface, component: 'AbovePrompt', props: PROPS })
+  const texts = (await band.findAll({ type: 'Text' })).map(t => t.text).join('')
+  await band.unmount()
+  return texts
+}
+
+const NEEDACTION = {
+  status: 200,
+  body: { answers: { status: { type: 'choice', choice: 'needaction', confidence: 0.9 } } },
+}
+
+test('asks Jev with the configured key and shows its verdict', { options: { api_key: 'k-test' } }, async ($, on) => {
+  const { sent, clock } = world(on, NEEDACTION)
+  await runTurn($)
+
+  for (const surface of SURFACES) expect(await bandText($, surface)).toContain('checking')
+
+  await clock.settle()
+
+  expect(sent.length).toBe(1)
+  expect(sent[0]!.url).toBe('https://api.typesafe.ai/v1/systemone')
+  expect(sent[0]!.init?.headers?.Authorization).toBe('Bearer k-test')
+  const body = JSON.parse(sent[0]!.init?.body ?? '{}')
+  expect(body.state).toEqual({
+    user_request: 'Deploy the app to staging.',
+    agent_final_message: 'Which AWS profile should I use, staging-admin or staging-ci?',
+    tool_errors: [],
+  })
+  expect(Object.keys(body.questions.status.criteria)).toEqual(['done', 'needaction', 'failed'])
+
+  for (const surface of SURFACES) {
+    const text = await bandText($, surface)
+    expect(text).toContain('needs action')
+    expect(text).toContain('90%')
+  }
 })
 
-test('shows checking, then the verdict Jev wrote for this session', async ($, on) => {
-  const clock = mock.clock(on, { now: 1_800_000_000_000 })
-  const files: Record<string, string> = {}
-  world(on, files)
+test('without a key it says so and sends nothing', async ($, on) => {
+  const { sent, clock } = world(on, NEEDACTION)
+  await runTurn($)
+  await clock.settle()
 
-  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
-  await $.prompt.submit({ text: 'deploy it', wait: false, origin: { kind: 'composer' } })
-  await $.turn.complete(turn('answer'))
-
-  for (const surface of SURFACES) {
-    const band = await $.ui.mount({ plugin: 'jev-status', surface, component: 'AbovePrompt', props: PROPS })
-    expect(await band.find({ text: 'checking' })).toBeTruthy()
-    await band.unmount()
-  }
-
-  files[STATUS_FILE] = JSON.stringify({ time: clock.now() / 1000, status: 'needaction', confidence: 0.9 })
-  await clock.advance(2000)
-
-  for (const surface of SURFACES) {
-    const band = await $.ui.mount({ plugin: 'jev-status', surface, component: 'AbovePrompt', props: PROPS })
-    expect(await band.find({ text: 'needs action' })).toBeTruthy()
-    expect(await band.find({ text: '90%' })).toBeTruthy()
-    expect(await band.find({ text: 'checking' })).toBeUndefined()
-    await band.unmount()
-  }
+  expect(sent.length).toBe(0)
+  for (const surface of SURFACES) expect(await bandText($, surface)).toContain('no TypeSafe API key')
 })
 
-test('an interrupted turn does not wait for a verdict', async ($, on) => {
-  mock.clock(on, { now: 1_800_000_000_000 })
-  world(on, {})
+test('an HTTP error shows as a Jev error', { options: { api_key: 'bad' } }, async ($, on) => {
+  const { clock } = world(on, { status: 401, body: { error: 'unauthorized' } })
+  await runTurn($)
+  await clock.settle()
 
-  await $.session.start({ cwd: '/w', surface: 'desktop', isInteractive: true })
-  await $.prompt.submit({ text: 'deploy it', wait: false, origin: { kind: 'composer' } })
-  await $.turn.complete(turn('aborted'))
+  for (const surface of SURFACES) expect(await bandText($, surface)).toContain('HTTP 401')
+})
 
-  for (const surface of SURFACES) {
-    const band = await $.ui.mount({ plugin: 'jev-status', surface, component: 'AbovePrompt', props: PROPS })
-    expect(await band.find({ text: /JEV/ })).toBeUndefined()
-    await band.unmount()
-  }
+test('an interrupted turn is not sent and shows nothing', { options: { api_key: 'k-test' } }, async ($, on) => {
+  const { sent, clock } = world(on, NEEDACTION)
+  await runTurn($, 'aborted')
+  await clock.settle()
+
+  expect(sent.length).toBe(0)
+  for (const surface of SURFACES) expect(await bandText($, surface)).not.toContain('JEV')
 })

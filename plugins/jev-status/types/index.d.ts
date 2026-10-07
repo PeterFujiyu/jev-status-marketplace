@@ -1,6 +1,5 @@
-/** What ~/.claude/hooks/jev-stop.py writes to ~/.claude/jev-status/<session_id>.json. */
+/** Jev's verdict on the last turn, or why there is none. */
 export type Verdict = {
-  time: number
   status: 'done' | 'needaction' | 'failed' | 'nokey' | 'error'
   confidence?: number
   error?: string

@@ -1,7 +1,22 @@
 {
   "name": "jev-status",
-  "version": "0.1.0",
-  "description": "Shows TypeSafe Jev's done / needaction / failed verdict for the last turn above the prompt",
+  "version": "0.2.0",
+  "description": "Asks TypeSafe Jev whether each turn left the task done, needaction or failed, and shows the verdict above the prompt",
   "author": { "name": "peter" },
-  "types": "./types/index.d.ts"
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "api_key": {
+      "type": "string",
+      "title": "TypeSafe API key",
+      "description": "From https://console.typesafe.ai/keys. Leave empty to use $TYPESAFE_API_KEY or ~/.config/typesafe/api_key.",
+      "sensitive": true,
+      "required": false
+    },
+    "toast": {
+      "type": "boolean",
+      "title": "Toast each verdict",
+      "description": "Also show each verdict as a toast",
+      "default": true
+    }
+  }
 }

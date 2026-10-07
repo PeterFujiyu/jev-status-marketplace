@@ -1,7 +1,12 @@
 # jev-status
 
-A Claude Code plugin that shows, above the prompt, whether the last turn left the task
-**done**, **needaction** or **failed**, as judged by [TypeSafe Jev](https://typesafe.ai).
+A Claude Code plugin that asks [TypeSafe Jev](https://typesafe.ai) after every turn whether
+your task is **done**, **needs action** from you, or **failed**, and shows the answer above
+the prompt (terminal and the desktop Code tab), plus a short toast.
+
+```
+JEV: ● needs action 100%
+```
 
 ## Install
 
@@ -10,17 +15,35 @@ claude plugin marketplace add <path or GitHub owner/repo of this marketplace>
 claude plugin install jev-status@peter-plugins
 ```
 
+Then give it a TypeSafe API key (from https://console.typesafe.ai/keys), in the first place
+that is set:
+
+1. the plugin's **TypeSafe API key** option (stored in your system's secure storage),
+2. the `TYPESAFE_API_KEY` environment variable,
+3. the file `~/.config/typesafe/api_key`.
+
+Without a key the band says so and nothing is sent.
+
+## Options
+
+| Option | Default | |
+|---|---|---|
+| TypeSafe API key | empty | see above |
+| Toast each verdict | on | also show each verdict as a toast |
+
+## What is sent
+
+After each turn that ends with an answer (not after an interrupt or an error), one request
+goes to `https://api.typesafe.ai/v1/systemone` containing:
+
+- your message for that turn (first 2,000 characters),
+- Claude's final message (last 4,000 characters),
+- up to three tool error messages from that turn (300 characters each),
+- the fixed question asking for `done`, `needaction` or `failed`.
+
+Nothing else: no files, no other tool output, no earlier turns. Subagent turns are not sent.
+
 ## Requirements
 
-This version only *displays* a verdict. It reads `~/.claude/jev-status/<session_id>.json`,
-which a separate Stop hook (`jev-stop.py`) must write after each turn. That hook is not
-part of this plugin yet.
-
-## Privacy
-
-The Stop hook sends each turn's request, Claude's final message and up to three tool error
-messages to `https://api.typesafe.ai` using your own TypeSafe API key.
-
-## Note
-
-Built on Claude Code's early-access plugin hooks API, which may change between releases.
+Claude Code 2.1.288 or newer. It is built on Claude Code's early-access plugin hooks API,
+which may change between releases.
