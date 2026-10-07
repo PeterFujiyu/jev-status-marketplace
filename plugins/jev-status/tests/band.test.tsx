@@ -85,6 +85,11 @@ function world(
   on('session.id', () => ({ value: current.id }))
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.end', (_$, e) => ({ sessionId: e.sessionId }))
+  const commands: string[] = []
+  on('command.register', (_$, e) => {
+    commands.push(e.name)
+    return { value: { command: e.name } }
+  })
   on('fs.exists', (_$, e) => {
     looked.push(e.path)
     return { value: false }
@@ -131,7 +136,7 @@ function world(
     return <Box />
   })
   const body = (i = sent.length - 1) => JSON.parse(sent[i]!.init?.body ?? '{}')
-  return { replies, sent, body, completes, forks, toasts, looked, clock, store, session: current, release: () => release() }
+  return { replies, sent, body, completes, forks, toasts, looked, clock, store, session: current, commands, release: () => release() }
 }
 
 type TurnSpec = {
@@ -1201,6 +1206,99 @@ test('no retry button before a turn is judged, or with the option off', { option
   for (const surface of SURFACES) expect(await retryButton($, surface)).toBeUndefined()
 })
 
+// ——— /jev and judging on demand ———
+
+const jev = ($: Engine) =>
+  $.command.run({ command: 'jev', args: '', origin: { kind: 'composer' }, presentation: { isFullscreen: false, columns: 80 } })
+
+test('/jev is registered and judges the last finished turn once', { options: KEY }, async ($, on) => {
+  const { commands, sent, replies, clock } = world(on, jevSays('done', 0.95, ['production', 0.91]))
+  await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
+  expect(commands).toEqual(['jev'])
+  expect((await jev($)).text).toBe('jev-status: no finished turn to judge yet.')
+  expect(sent.length).toBe(0)
+
+  await runTurn($)
+  await clock.settle()
+  expect(sent.length).toBe(1)
+  replies.jev = jevSays('done', 0.95, ['development', 0.88])
+  expect((await jev($)).text).toBe('jev-status: judging the last turn…')
+  await expectBand($, 'checking')
+  await clock.settle()
+  expect(sent.length).toBe(2)
+  expect(JSON.parse(sent[1]!.init?.body ?? '{}').state.user_request).toBe('Deploy the app to staging.')
+  await expectBand($, '◆ development 88%')
+})
+
+test('/jev after an interrupted turn has nothing to judge', { options: KEY }, async ($, on) => {
+  const { sent, clock } = world(on, jevSays('done', 0.95))
+  await runTurn($)
+  await clock.settle()
+  await runTurn($, { reason: 'aborted' })
+  await clock.settle()
+  expect((await jev($)).text).toBe('jev-status: no finished turn to judge yet.')
+  expect(sent.length).toBe(1)
+})
+
+test('with judging every turn off, nothing is sent until /jev', { options: { ...KEY, auto_judge: false } }, async ($, on) => {
+  const { sent, completes, forks, toasts, clock, store } = world(on, jevSays('done', 0.95, ['production', 0.91]))
+  await runTurn($, { bash: ['git push'] })
+  await clock.settle()
+  expect([sent.length, completes.length, forks.length, toasts.length]).toEqual([0, 0, 0, 0])
+  await expectBand($, 'JEV: not judged · /jev')
+  for (const surface of SURFACES) expect(await retryButton($, surface)).toBeDefined()
+  expect((store.get('session:sess-1') as { verdict: unknown }).verdict).toBeNull()
+
+  await jev($)
+  await clock.settle()
+  expect(sent.length).toBe(1)
+  expect(forks.length).toBe(1) // the push still sends ship to the session-context review
+  await expectBand($, 'JEV task: ', '✔ done 95%')
+})
+
+test('with judging off, the band\'s button judges the turn', { options: { ...KEY, auto_judge: false } }, async ($, on) => {
+  const { sent, clock } = world(on, jevSays('done', 0.95))
+  await runTurn($)
+  await clock.settle()
+  const band = await $.ui.mount({ plugin: 'jev-status', surface: 'desktop', component: 'AbovePrompt', props: PROPS })
+  await band.press({ key: 'retry' })
+  await band.unmount()
+  await clock.settle()
+  expect(sent.length).toBe(1)
+  await expectBand($, '✔ done 95%')
+})
+
+test('with judging off and no button, the band still points to /jev', { options: { ...KEY, auto_judge: false, retry_button: false } }, async ($, on) => {
+  const { clock, store } = world(on, jevSays('done', 0.95))
+  await runTurn($)
+  await clock.settle()
+  await expectBand($, 'JEV: not judged · /jev')
+  for (const surface of SURFACES) expect(await retryButton($, surface)).toBeUndefined()
+  // /jev still needs the turn after a restart, so it is kept.
+  expect((store.get('session:sess-1') as { turn?: unknown }).turn).toBeDefined()
+})
+
+test('with judging off, a resumed session offers its turn not judged yet', { options: { ...KEY, auto_judge: false } }, async ($, on) => {
+  const { sent, clock } = world(on, jevSays('done', 0.95), undefined, undefined, undefined, {
+    'session:sess-1': { ...keptAt(5), verdict: null },
+  })
+  await $.session.start(START)
+  await expectBand($, 'JEV: not judged · /jev')
+  await jev($)
+  await clock.settle()
+  expect(JSON.parse(sent[0]!.init?.body ?? '{}').state.user_request).toBe('Ship the fix.')
+})
+
+test('with judging off and no button, /jev still judges a resumed session\'s turn', { options: { ...KEY, auto_judge: false, retry_button: false } }, async ($, on) => {
+  const { sent, clock } = world(on, jevSays('done', 0.95), undefined, undefined, undefined, {
+    'session:sess-1': { ...keptAt(5), verdict: null },
+  })
+  await $.session.start(START)
+  await jev($)
+  await clock.settle()
+  expect(JSON.parse(sent[0]!.init?.body ?? '{}').state.user_request).toBe('Ship the fix.')
+})
+
 // ——— Kept across restarts ———
 
 const START = { cwd: '/repo', surface: 'terminal' as const, isInteractive: true }
@@ -1282,6 +1380,8 @@ test('a resumed session with nothing kept, or something unreadable, draws nothin
   await $.session.start(START)
   await expectNoBand($)
   for (const surface of SURFACES) expect(await retryButton($, surface)).toBeUndefined()
+  // Its turn is not taken up either.
+  expect((await jev($)).text).toBe('jev-status: no finished turn to judge yet.')
 })
 
 test('a kept turn of another shape is not retried', { options: KEY }, async ($, on) => {

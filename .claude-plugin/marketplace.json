@@ -9,7 +9,7 @@
       "name": "jev-status",
       "source": "./plugins/jev-status",
       "description": "Asks TypeSafe Jev after each turn where the task stands and the highest safe delivery level of the session's active work, and shows both above the prompt",
-      "version": "0.8.4"
+      "version": "0.8.5"
     }
   ]
 }

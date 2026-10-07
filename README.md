@@ -24,6 +24,11 @@ the band focused (never from the prompt). It reuses the same summary and runs a 
 session-context review where one is needed. It is there for working on the plugin and for a
 verdict that went wrong (a timeout, a Jev error), and it appears once a turn has been judged.
 
+**`/jev`** does the same from the prompt: it judges the last finished turn once (typed while a turn
+runs, it waits for that turn to end and judges it). After an interrupted turn there is nothing to
+judge. With **Judge every turn** off, turns are only recorded: nothing goes to TypeSafe or Claude
+until you run `/jev` or press the band's **↻ Judge**, and the band shows `JEV: not judged · /jev`.
+
 The last verdict is kept per session (see *What is kept on disk*), so closing Claude Code or the
 desktop app and resuming the session draws it again, retry included, and so does `/resume` from
 inside a session; `/clear` empties the band. A new prompt clears the kept verdict, as it
@@ -201,7 +206,8 @@ Without a key nothing goes to TypeSafe; Claude judges each turn instead (unless 
 |---|---|---|
 | TypeSafe API key | empty | see above |
 | Toast each verdict | on | also show each verdict as a toast |
-| Retry button | on | show **↻ Retry** on the right of the band; off also keeps no turn excerpts on disk |
+| Judge every turn | on | judge each turn as it ends; off, only `/jev` and the band's button judge, so nothing is sent until you ask |
+| Retry button | on | show **↻ Retry** (or **↻ Judge**) on the right of the band; off, with judging every turn on, also keeps no turn excerpts on disk |
 | Ship check | on | also ask the ship and verification questions; off shows only the task row. Left unset, 0.6's *Deploy check* applies |
 | Ask Claude below (% Jev confidence) | 70 | below this, Claude gives a second opinion on that answer; used for both questions unless overridden below; 0 never asks (delivery turns included) |
 | Task threshold (%) | empty | overrides the above for the task question |
@@ -245,11 +251,12 @@ Claude's second opinions go to Anthropic through Claude Code, like the session i
 ### What is kept on disk
 
 The plugin's own store (a JSON file under your Claude Code configuration directory) keeps, for
-each of the 20 most recent sessions, the last verdict shown and, with the retry button on, the turn
-it judged: the same excerpts that are sent (your message, Claude's final message, tool error
+each of the 20 most recent sessions, the last verdict shown and, with the retry button on or
+judging every turn off, the last turn: the same excerpts that are sent (your message, Claude's final message, tool error
 messages), the observed check states and whether the turn delivered work. It stays on your
 machine. A new prompt removes that session's entry until its verdict is in, and older sessions'
-entries are dropped. Turn the retry button off to keep only the verdicts.
+entries are dropped. With the retry button off and judging every turn on, only the verdicts are
+kept.
 
 ## Requirements
 

@@ -593,10 +593,11 @@ function numberOption(v: unknown): number | undefined {
 type Live = { epoch: number; activeBefore: boolean; lastTurn: Turn | null; sessionId: string | null }
 
 // The last verdict of each session, kept in $.store so a resumed session (or a reloaded plugin)
-// draws it again; with the retry button on, the turn it judged too, so retry still works.
+// draws it again; with the retry button on or judging left to /jev, the last turn too, so it can
+// still be judged. Judging left to /jev keeps a turn not judged yet with no verdict.
 const KEPT_PREFIX = 'session:'
 const KEPT_SESSIONS = 20
-type Kept = { at: number; verdict: Verdict; turn?: Turn; activeBefore: boolean }
+type Kept = { at: number; verdict: Verdict | null; turn?: Turn; activeBefore: boolean }
 
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
@@ -634,24 +635,25 @@ const isVerdict = (v: unknown): v is Verdict => isRecord(v) && isRecord(v.status
 /** This session's kept verdict, or null when there is none or it has another shape. */
 async function loadKept($: EngineInterface): Promise<Kept | null> {
   const kept = await $.store.get(KEPT_PREFIX + (await $.session.id()))
-  if (!isRecord(kept) || !isVerdict(kept.verdict)) return null
-  return {
-    at: typeof kept.at === 'number' ? kept.at : 0,
-    verdict: kept.verdict,
-    turn: keptTurn(kept.turn),
-    activeBefore: kept.activeBefore === true,
-  }
+  if (!isRecord(kept)) return null
+  const turn = keptTurn(kept.turn)
+  // A turn not judged yet is kept alone; anything else needs a verdict of this version's shape.
+  const judged = isVerdict(kept.verdict) ? kept.verdict : null
+  if (judged === null && (kept.verdict !== null || turn === undefined)) return null
+  return { at: typeof kept.at === 'number' ? kept.at : 0, verdict: judged, turn, activeBefore: kept.activeBefore === true }
 }
 
 /** Takes up this session's kept verdict: drawn unless one is already in the session's state. */
-async function restoreKept($: EngineInterface, live: Live, retry: boolean) {
+async function restoreKept($: EngineInterface, live: Live, keepTurn: boolean) {
   const kept = await loadKept($)
   if (kept === null) return
   live.activeBefore = kept.activeBefore
-  if (retry && kept.turn !== undefined) live.lastTurn = kept.turn
-  if ((await read($, verdict)) === null && (await read($, phase)) === 'idle') {
-    await update($, verdict, () => kept.verdict)
-  }
+  if (keepTurn && kept.turn !== undefined) live.lastTurn = kept.turn
+  if ((await read($, verdict)) !== null || (await read($, phase)) !== 'idle') return
+  const shown = kept.verdict
+  if (shown !== null) await update($, verdict, () => shown)
+  // A turn not judged yet: draw again so the band offers to judge it.
+  else await update($, phase, (): Phase => 'idle')
 }
 
 /**
@@ -659,13 +661,13 @@ async function restoreKept($: EngineInterface, live: Live, retry: boolean) {
  * kept; `id` and `since` are the session and epoch it was scheduled at. A turn started since (or
  * another switch) owns what is drawn by then, so it does nothing.
  */
-async function takeUpSession($: EngineInterface, live: Live, retry: boolean, id: string, since: number) {
+async function takeUpSession($: EngineInterface, live: Live, keepTurn: boolean, id: string, since: number) {
   if (live.epoch !== since || live.sessionId !== id) return
   forgetSession(live)
   const mine = live.epoch
   await Promise.all([update($, verdict, () => null), update($, phase, (): Phase => 'idle')])
   if (live.epoch !== mine || live.sessionId !== id) return
-  await restoreKept($, live, retry)
+  await restoreKept($, live, keepTurn)
 }
 
 /** Drops a judgement in flight, and what the next turn and the retry button would take from this session. */
@@ -758,6 +760,10 @@ export const register: Register = (on, options) => {
   const live: Live = { epoch: 0, activeBefore: false, lastTurn: null, sessionId: null }
   const toast = options.toast !== false
   const retry = options.retry_button !== false
+  // Off: turns are recorded but judged only on /jev (or the band's button).
+  const auto = options.auto_judge !== false
+  // The last turn is kept with the verdict whenever something can judge it again later.
+  const keepTurn = retry || !auto
   // Bumped by every new turn only: tool results are kept for the turn they started in.
   let turnNo = 0
   // The turn each subagent was first seen in: a background one may outlive it.
@@ -768,7 +774,8 @@ export const register: Register = (on, options) => {
   on('session.start', async ($, e, next) => {
     // Nothing kept, or the store can't be read: the band waits for the next turn.
     live.sessionId = await $.session.id().catch(() => null)
-    await restoreKept($, live, retry).catch(() => {})
+    await $.command.register({ name: 'jev', description: 'Judge the last finished turn now (TypeSafe Jev, and Claude where needed)' }).catch(() => {})
+    await restoreKept($, live, keepTurn).catch(() => {})
 
     return next(e)
   })
@@ -783,6 +790,14 @@ export const register: Register = (on, options) => {
     await Promise.all([update($, verdict, () => null), update($, phase, (): Phase => 'idle')]).catch(() => {})
 
     return ended
+  })
+
+  // /jev waits for a running turn to end, so it judges that turn once it has.
+  on('command.run', { command: 'jev' }, async $ => {
+    const turn = live.lastTurn
+    if (turn === null) return { text: 'jev-status: no finished turn to judge yet.' }
+    await startJudging($, live, settings, toast, keepTurn, turn)
+    return { text: 'jev-status: judging the last turn…' }
   })
 
   on('prompt.submit', async ($, e, next) => {
@@ -848,14 +863,24 @@ export const register: Register = (on, options) => {
     if (e.agentId !== undefined) return done
 
     // Interrupted or errored turns have no answer worth judging; the last verdict was cleared.
+    // Nothing is left to judge: /jev and the band's button would otherwise reach back to the turn before.
     if (e.reason !== 'answer' || !e.answer.trim()) {
       live.epoch += 1
+      live.lastTurn = null
       await update($, phase, (): Phase => 'idle')
       return done
     }
 
-    live.lastTurn = { prompt, answer: clip(e.answer, MAX_ANSWER_CHARS), errors, errorCount, checks: { ...checks }, delivered, activeBefore: live.activeBefore }
-    await startJudging($, live, settings, toast, retry, live.lastTurn)
+    const turn: Turn = { prompt, answer: clip(e.answer, MAX_ANSWER_CHARS), errors, errorCount, checks: { ...checks }, delivered, activeBefore: live.activeBefore }
+    live.lastTurn = turn
+    if (auto) {
+      await startJudging($, live, settings, toast, keepTurn, turn)
+    } else {
+      live.epoch += 1
+      await update($, phase, (): Phase => 'idle')
+      const kept: Kept = { at: await $.clock.now(), verdict: null, turn, activeBefore: live.activeBefore }
+      await saveKept($, kept).catch(() => {})
+    }
 
     return done
   })
@@ -869,18 +894,34 @@ export const register: Register = (on, options) => {
       const first = live.sessionId === null
       live.sessionId = id
       const since = live.epoch
-      if (!first) $.clock.after(0, () => { takeUpSession($, live, retry, id, since).catch(() => {}) })
+      if (!first) $.clock.after(0, () => { takeUpSession($, live, keepTurn, id, since).catch(() => {}) })
     }
 
     const p = await read($, phase)
     // A verdict kept from an earlier version of the plugin has another shape: ignore it.
     const kept = await read($, verdict)
     const v = typeof kept?.status === 'object' && kept.status !== null ? kept : null
-    if (e.props.hasSurvey || e.props.isWorking || p === 'running' || (p === 'idle' && v === null)) {
+    // With judging left to /jev, a finished turn not judged yet says so.
+    const unjudged = !auto && p === 'idle' && v === null && live.lastTurn !== null
+    if (e.props.hasSurvey || e.props.isWorking || p === 'running' || (p === 'idle' && v === null && !unjudged)) {
       return next(e)
     }
 
     const { Box, Button, Text } = $.ui.resolve(e)
+    const again = live.lastTurn
+    const judge = (label: string) =>
+      again === null ? null : (
+        <Button key="retry" label={label} hotkey="r" plain dimColor onPress={() => startJudging($, live, settings, toast, keepTurn, again).catch(() => {})} />
+      )
+
+    if (unjudged) {
+      return (
+        <Box justifyContent="space-between">
+          <Text dimColor>JEV: not judged · /jev</Text>
+          {retry ? judge('↻ Judge') : null}
+        </Box>
+      )
+    }
 
     if (p === 'checking' || v === null) {
       return (
@@ -915,14 +956,13 @@ export const register: Register = (on, options) => {
         {showShip ? row('JEV ship: ', LOOK.ship, ship) : null}
       </Box>
     )
-    const again = live.lastTurn
     if (!retry || again === null) return rows
 
     // Judges the same turn again (Jev and any reviews), e.g. while trying settings or prompts.
     return (
       <Box justifyContent="space-between">
         {rows}
-        <Button key="retry" label="↻ Retry" hotkey="r" plain dimColor onPress={() => startJudging($, live, settings, toast, retry, again).catch(() => {})} />
+        {judge('↻ Retry')}
       </Box>
     )
   })

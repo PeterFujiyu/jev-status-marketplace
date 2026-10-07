@@ -1,6 +1,6 @@
 {
   "name": "jev-status",
-  "version": "0.8.4",
+  "version": "0.8.5",
   "description": "After each turn asks TypeSafe Jev where the task stands (done, needaction, failed) and the highest safe delivery level of the session's active work (production, development, blocked, na), gated by an internal verification check so production needs verification complete; Claude gives second opinions, unsettled answers fail closed, and both rows show above the prompt",
   "author": {
     "name": "peter"
@@ -18,6 +18,12 @@
       "type": "boolean",
       "title": "Toast each verdict",
       "description": "Also show each verdict as a toast",
+      "default": true
+    },
+    "auto_judge": {
+      "type": "boolean",
+      "title": "Judge every turn",
+      "description": "Judge each turn as it ends. Off, nothing is sent to TypeSafe or Claude until you run /jev or press the band's ↻ Judge button; the last turn is kept (also on disk) so it can be judged later.",
       "default": true
     },
     "retry_button": {
