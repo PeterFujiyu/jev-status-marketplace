@@ -160,6 +160,13 @@ async function expectBand($: Engine, ...texts: string[]) {
   }
 }
 
+async function retryButton($: Engine, surface: (typeof SURFACES)[number]) {
+  const band = await $.ui.mount({ plugin: 'jev-status', surface, component: 'AbovePrompt', props: PROPS })
+  const found = await band.find({ key: 'retry' })
+  await band.unmount()
+  return found
+}
+
 async function expectNoBand($: Engine) {
   for (const surface of SURFACES) expect(await bandText($, surface)).not.toContain('JEV')
 }
@@ -1087,6 +1094,40 @@ test('ship_below set wins over 0.6\'s deploy_below', { options: { ...KEY, deploy
   await runTurn($)
   await clock.settle()
   expect(forks.length).toBe(1)
+})
+
+test('the retry button judges the last turn again', { options: KEY }, async ($, on) => {
+  const { replies, sent, clock } = world(on, jevSays('done', 0.95, ['production', 0.91]))
+  for (const surface of SURFACES) {
+    await runTurn($)
+    await clock.settle()
+    await expectBand($, '▲ production 91%')
+    expect(await retryButton($, surface)).toBeDefined()
+    const before = sent.length
+
+    // Jev answers differently this time; the press re-sends the same turn.
+    replies.jev = jevSays('done', 0.95, ['development', 0.88])
+    const band = await $.ui.mount({ plugin: 'jev-status', surface, component: 'AbovePrompt', props: PROPS })
+    await band.press({ key: 'retry' })
+    await band.unmount()
+    await expectBand($, 'checking')
+    await clock.settle()
+
+    expect(sent.length).toBe(before + 1)
+    expect(JSON.parse(sent.at(-1)!.init?.body ?? '{}').state.agent_final_message).toBe(
+      'Which AWS profile should I use, staging-admin or staging-ci?',
+    )
+    await expectBand($, '◆ development 88%')
+    replies.jev = jevSays('done', 0.95, ['production', 0.91])
+  }
+})
+
+test('no retry button before a turn is judged, or with the option off', { options: { ...KEY, retry_button: false } }, async ($, on) => {
+  const { clock } = world(on, jevSays('done', 0.95))
+  await runTurn($)
+  await clock.settle()
+  await expectBand($, 'done 95%')
+  for (const surface of SURFACES) expect(await retryButton($, surface)).toBeUndefined()
 })
 
 test('a verdict kept from 0.4.0 is ignored, not drawn', { options: KEY }, async ($, on) => {

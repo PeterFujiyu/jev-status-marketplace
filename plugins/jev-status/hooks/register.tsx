@@ -568,6 +568,43 @@ function numberOption(v: unknown): number | undefined {
   return undefined
 }
 
+/** What judging shares across turns: the newest judgement, and whether the last ship answer had active work. */
+type Live = { epoch: number; activeBefore: boolean }
+
+/** Judges `turn` after the current dispatch, showing "checking…" until its verdict settles. */
+async function startJudging($: EngineInterface, live: Live, s: Settings, toast: boolean, turn: Turn) {
+  const mine = ++live.epoch
+  await update($, phase, (): Phase => 'checking')
+
+  let settled = false
+  const settle = async (v: Verdict) => {
+    // A newer turn started, or this one already settled.
+    if (mine !== live.epoch || settled) return
+    settled = true
+    await update($, verdict, () => v)
+    await update($, phase, (): Phase => 'idle')
+    const shipped = v.ship?.choice
+    if (shipped !== undefined && shipped !== 'nokey' && shipped !== 'error') live.activeBefore = shipped !== 'na'
+    if (toast && v.status.choice !== 'nokey') {
+      const ship = v.ship ? ` · ship: ${said(LOOK.ship[v.ship.choice], v.ship)}` : ''
+      $.ui.toast(`${said(LOOK.status[v.status.choice], v.status)}${ship}`)
+    }
+  }
+
+  const failAll = (error: string) => allAre(s.questions, { choice: 'error', source: 'jev', error }) as Verdict
+
+  // Judge after the turn has settled, off this dispatch.
+  $.clock.after(0, () => {
+    judge($, s, turn)
+      .catch((err: unknown) => failAll(err instanceof Error ? err.message.slice(0, 60) : 'request failed'))
+      .then(settle)
+      .catch(() => {})
+  })
+  $.clock.after(GIVE_UP_MS, () => {
+    settle(failAll('no answer in 2 min')).catch(() => {})
+  })
+}
+
 export const register: Register = (on, options) => {
   const below = numberOption(options.claude_below) ?? DEFAULT_BELOW
   // ship_check and ship_below replaced 0.6's deploy_check and deploy_below, which stay declared so
@@ -591,17 +628,19 @@ export const register: Register = (on, options) => {
   let errorCount = 0
   let checks = unknownChecks()
   let delivered = false
-  // Whether the last ship answer shown had active work (anything but n/a); Jev errors leave it as it was.
-  let activeBefore = false
-  // Bumped by every new turn and every judgement started: an older one can't settle.
-  let epoch = 0
+  // The last turn judged, kept so the retry button can judge it again.
+  let lastTurn: Turn | null = null
+  // epoch: bumped by every new turn and every judgement started, so an older one can't settle.
+  // activeBefore: whether the last ship answer shown had active work (anything but n/a); Jev errors leave it.
+  const live: Live = { epoch: 0, activeBefore: false }
+  const toast = options.toast !== false
   // Bumped by every new turn only: tool results are kept for the turn they started in.
   let turnNo = 0
   // The turn each subagent was first seen in: a background one may outlive it.
   const agentTurn = new Map<string, number>()
 
   on('prompt.submit', async ($, e, next) => {
-    epoch += 1
+    live.epoch += 1
     turnNo += 1
     // A background task's notification starts a turn too, but the request stays the user's last.
     if (e.origin.kind !== 'task-notification') prompt = clip(e.text, MAX_PROMPT_CHARS)
@@ -662,46 +701,17 @@ export const register: Register = (on, options) => {
 
     // Interrupted or errored turns have no answer worth judging; the last verdict was cleared.
     if (e.reason !== 'answer' || !e.answer.trim()) {
-      epoch += 1
+      live.epoch += 1
       await update($, phase, (): Phase => 'idle')
       return done
     }
 
-    const mine = ++epoch
-    const turn: Turn = { prompt, answer: clip(e.answer, MAX_ANSWER_CHARS), errors, errorCount, checks: { ...checks }, delivered, activeBefore }
-    await update($, phase, (): Phase => 'checking')
-
-    let settled = false
-    const settle = async (v: Verdict) => {
-      // A newer turn started, or this one already settled.
-      if (mine !== epoch || settled) return
-      settled = true
-      await update($, verdict, () => v)
-      await update($, phase, (): Phase => 'idle')
-      const shipped = v.ship?.choice
-      if (shipped !== undefined && shipped !== 'nokey' && shipped !== 'error') activeBefore = shipped !== 'na'
-      if (options.toast !== false && v.status.choice !== 'nokey') {
-        const ship = v.ship ? ` · ship: ${said(LOOK.ship[v.ship.choice], v.ship)}` : ''
-        $.ui.toast(`${said(LOOK.status[v.status.choice], v.status)}${ship}`)
-      }
-    }
-
-    const failAll = (error: string) =>
-      allAre(settings.questions, { choice: 'error', source: 'jev', error }) as Verdict
-
-    // Judge after the turn has settled, off this dispatch.
-    $.clock.after(0, () => {
-      judge($, settings, turn)
-        .catch((err: unknown) => failAll(err instanceof Error ? err.message.slice(0, 60) : 'request failed'))
-        .then(settle)
-        .catch(() => {})
-    })
-    $.clock.after(GIVE_UP_MS, () => {
-      settle(failAll('no answer in 2 min')).catch(() => {})
-    })
+    lastTurn = { prompt, answer: clip(e.answer, MAX_ANSWER_CHARS), errors, errorCount, checks: { ...checks }, delivered, activeBefore: live.activeBefore }
+    await startJudging($, live, settings, toast, lastTurn)
 
     return done
   })
+
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const p = await read($, phase)
@@ -712,7 +722,7 @@ export const register: Register = (on, options) => {
       return next(e)
     }
 
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Button, Text } = $.ui.resolve(e)
 
     if (p === 'checking' || v === null) {
       return (
@@ -741,10 +751,20 @@ export const register: Register = (on, options) => {
       ship.choice !== 'nokey' &&
       !(ship.choice === 'error' && status.choice === 'error' && ship.error === status.error)
 
-    return (
+    const rows = (
       <Box flexDirection="column">
         {row(showShip ? 'JEV task: ' : 'JEV: ', LOOK.status, status)}
         {showShip ? row('JEV ship: ', LOOK.ship, ship) : null}
+      </Box>
+    )
+    const again = lastTurn
+    if (options.retry_button === false || again === null) return rows
+
+    // Judges the same turn again (Jev and any reviews), e.g. while trying settings or prompts.
+    return (
+      <Box justifyContent="space-between">
+        {rows}
+        <Button key="retry" label="↻ retry" hotkey="r" plain dimColor onPress={() => startJudging($, live, settings, toast, again).catch(() => {})} />
       </Box>
     )
   })

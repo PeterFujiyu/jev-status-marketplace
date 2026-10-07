@@ -1,6 +1,6 @@
 {
   "name": "jev-status",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "After each turn asks TypeSafe Jev where the task stands (done, needaction, failed) and the highest safe delivery level of the session's active work (production, development, blocked, na), gated by an internal verification check so production needs verification complete; Claude gives second opinions, unsettled answers fail closed, and both rows show above the prompt",
   "author": {
     "name": "peter"
@@ -18,6 +18,12 @@
       "type": "boolean",
       "title": "Toast each verdict",
       "description": "Also show each verdict as a toast",
+      "default": true
+    },
+    "retry_button": {
+      "type": "boolean",
+      "title": "Retry button",
+      "description": "Show a ↻ retry button at the right of the verdict that judges the last turn again (Jev and any Claude reviews); handy while developing and testing.",
       "default": true
     },
     "ship_check": {

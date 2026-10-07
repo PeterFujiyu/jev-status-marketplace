@@ -19,6 +19,11 @@ JEV task: ✔ done 95%
 JEV ship: ? needs review · Jev suggested production 35%
 ```
 
+On the right of the band, **r: ↻ retry** judges the last turn again: click it, or press `r` with
+the band focused (never from the prompt). It reuses the same summary and runs a fresh
+session-context review where one is needed. It is there for working on the plugin and for a
+verdict that went wrong (a timeout, a Jev error), and it appears once a turn has been judged.
+
 ## The two questions
 
 **task**: where your request stands. It says nothing about delivery.
@@ -174,6 +179,7 @@ Without a key nothing goes to TypeSafe; Claude judges each turn instead (unless 
 |---|---|---|
 | TypeSafe API key | empty | see above |
 | Toast each verdict | on | also show each verdict as a toast |
+| Retry button | on | show **↻ retry** on the right of the band |
 | Ship check | on | also ask the ship and verification questions; off shows only the task row. Left unset, 0.6's *Deploy check* applies |
 | Ask Claude below (% Jev confidence) | 70 | below this, Claude gives a second opinion on that answer; used for both questions unless overridden below; 0 never asks (delivery turns included) |
 | Task threshold (%) | empty | overrides the above for the task question |
