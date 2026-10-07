@@ -77,18 +77,26 @@ Limits, chosen so that an observation errs towards `unknown` rather than `passed
 - It relies on Claude Code reporting a non-zero exit as a tool error. That is how Claude Code
   behaves, but the plugin API's types don't promise it. A non-zero exit that Claude Code reads as
   no error (for example `grep` finding nothing) counts as `unknown`, never `passed`.
-- It only knows a command's exit status, not its output. A command counts only when that status
-  speaks for it: plain commands and `&&` chains. Anything piped (`npm test | tail`), joined with `;`
-  or `||`, or run in the background stays `unknown`, since the exit status there may belong to
-  another command.
-- A failed `&&` chain counts only when exactly one check is in it (with `cd`/`export` alone around
-  it); otherwise the failing step can't be told.
+- It only knows a command's exit status, not its output. A check passes only when that status
+  speaks for a real run of it: a plain command, or an `&&` chain that exited 0.
+- Version, help, listing and dry-run forms (`pytest --version`, `tsc -v`, `npm test -- --help`,
+  `jest --listTests`, `pytest --collect-only`, `cargo test --no-run`, `--dry-run`, …) are not runs.
+- A failure is blamed on a check only when the command was that check alone. In a failed chain
+  (`cd /missing && npm test`, `source env.sh && pytest`) any step may have failed, so the check
+  becomes `unknown`.
+- A check that ran but whose outcome can't be told becomes `unknown`, replacing any earlier
+  `passed` or `failed` from the same turn: piped (`npm test | tail`), joined with `;` or `||`, run
+  in the background, interrupted, timed out, a failed chain, or a not-a-run form as above.
+  Commands that touch no check change nothing.
 - Commands are recognized by name from a fixed list of common tools and package scripts; custom
   scripts (`./scripts/ci.sh`) stay `unknown`.
 - Only Bash is watched (subagents' Bash calls in the turn included); checks run through other tools
   (MCP servers, IDE tasks) are not seen.
 - Checks reset with each new prompt, a background task's notification included; they describe
-  that turn only.
+  that turn only. A tool call that started in an earlier turn and finishes later is not counted,
+  and neither are the tools of a subagent first seen in an earlier turn (a background agent still
+  running). A background agent whose first tool call comes after the next prompt can't be told
+  apart and is counted.
 
 ## Install
 

@@ -15,6 +15,7 @@ const USAGE = { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, c
 
 type Sent = { url: string; init?: HttpInit }
 type JevReply = { status: number; body: unknown } | 'network' | { raw: string }
+type Check = 'tests' | 'build' | 'typecheck' | 'lint'
 type State = {
   user_request: string
   agent_final_message: string
@@ -58,6 +59,9 @@ function world(
   const forks: string[] = []
   const toasts: string[] = []
   const looked: string[] = []
+  // A Bash command containing SLOW waits until release() is called.
+  let release = () => {}
+  const gate = new Promise<void>(resolve => (release = resolve))
   const reply = (text: string): ModelCompleteResult => ({ isAnswered: true, text, usage: USAGE })
   const refused: ModelCompleteResult = { isAnswered: false, reason: 'api-error', status: 529, error: 'overloaded', usage: USAGE }
 
@@ -90,7 +94,8 @@ function world(
     toasts.push(e.text)
     return { value: undefined }
   })
-  on('tool.call', (_$, e) => {
+  on('tool.call', async (_$, e) => {
+    if (e.tool === 'Bash' && /SLOW/.test(e.command)) await gate
     const fails = e.tool === 'Bash' && /FAIL/.test(e.command)
     // NONZERO: a non-zero exit Claude Code interprets as no error.
     const nonzero = e.tool === 'Bash' && /NONZERO/.test(e.command)
@@ -108,14 +113,17 @@ function world(
     return <Box />
   })
   const body = (i = sent.length - 1) => JSON.parse(sent[i]!.init?.body ?? '{}')
-  return { replies, sent, body, completes, forks, toasts, looked, clock }
+  return { replies, sent, body, completes, forks, toasts, looked, clock, release: () => release() }
 }
 
 type TurnSpec = {
   prompt?: string
   answer?: string
   reason?: 'answer' | 'aborted'
-  /** Bash commands the agent runs; FAIL in one exits with an error, NONZERO exits non-zero read as no error. */
+  /**
+   * Bash commands the agent runs; FAIL in one exits with an error, NONZERO exits
+   * non-zero read as no error, SLOW waits for release().
+   */
   bash?: string[]
 }
 
@@ -631,7 +639,8 @@ test('checks are observed from commands, not from the final message', { options:
   expect(await observed([])).toEqual({ tests: 'unknown', build: 'unknown', typecheck: 'unknown', lint: 'unknown' })
   expect(await observed(['npm test'])).toMatchObject({ tests: 'passed' })
   expect(await observed(['npx tsc --noEmit FAIL'])).toMatchObject({ typecheck: 'failed' })
-  expect(await observed(['cd app && npm run build FAIL'])).toMatchObject({ build: 'failed' })
+  expect(await observed(['npm run build FAIL'])).toMatchObject({ build: 'failed' })
+  expect(await observed(['cd app && npm run build'])).toMatchObject({ build: 'passed' })
   expect(await observed(['npm test && npm run lint'])).toMatchObject({ tests: 'passed', lint: 'passed' })
   expect(await observed(['npm test && npm run lint FAIL'])).toMatchObject({ tests: 'unknown', lint: 'unknown' })
   expect(await observed(['npm test 2>&1 | tail -20'])).toMatchObject({ tests: 'unknown' })
@@ -651,6 +660,89 @@ test('checks are observed from commands, not from the final message', { options:
     typecheck: 'passed',
     build: 'passed',
   })
+})
+
+test('versions, help, listings and dry runs are not runs', { options: KEY }, async ($, on) => {
+  const { body, clock } = world(on, jevSays('done', 0.95))
+  const after = async (bash: string[]) => {
+    await runTurn($, { bash })
+    await clock.settle()
+    return body().state.observed_checks
+  }
+
+  // Each: the command, its check, and a real run of that check.
+  const notRuns: [string, Check, string][] = [
+    ['pytest --version', 'tests', 'pytest'],
+    ['pytest -V', 'tests', 'pytest'],
+    ['npm test -- --help', 'tests', 'npm test'],
+    ['jest --listTests', 'tests', 'jest'],
+    ['vitest list', 'tests', 'vitest run'],
+    ['pytest --collect-only -q', 'tests', 'pytest'],
+    ['go test -list .', 'tests', 'go test ./...'],
+    ['cargo test --no-run', 'tests', 'cargo test'],
+    ['npx playwright test --list', 'tests', 'npx playwright test'],
+    ['tsc --version', 'typecheck', 'tsc'],
+    ['npx tsc -v', 'typecheck', 'npx tsc'],
+    ['tsc --showConfig', 'typecheck', 'tsc'],
+    ['eslint --print-config a.js', 'lint', 'eslint .'],
+    ['npm run build -- --dry-run', 'build', 'npm run build'],
+  ]
+  for (const [command, check, realRun] of notRuns) {
+    // Alone, and after a real run that failed: neither makes the check pass.
+    expect((await after([command]))[check]).toBe('unknown')
+    expect((await after([`${realRun} FAIL`, command]))[check]).toBe('unknown')
+  }
+  // Ordinary flags are still runs.
+  expect((await after(['pytest -v -x'])).tests).toBe('passed')
+  expect((await after(['npx tsc --noEmit -p .'])).typecheck).toBe('passed')
+})
+
+test('a run that can\'t be told resets an older pass to unknown', { options: KEY }, async ($, on) => {
+  const { body, clock } = world(on, jevSays('done', 0.95))
+  const after = async (bash: string[]) => {
+    await runTurn($, { bash })
+    await clock.settle()
+    return body().state.observed_checks
+  }
+
+  expect(await after(['npm test', 'npm test && npm run lint FAIL'])).toMatchObject({ tests: 'unknown', lint: 'unknown' })
+  expect(await after(['npm test', 'npm test 2>&1 | tail -5'])).toMatchObject({ tests: 'unknown' })
+  expect(await after(['npm test', 'npm test; echo done'])).toMatchObject({ tests: 'unknown' })
+  expect(await after(['npm test', 'npm test || true'])).toMatchObject({ tests: 'unknown' })
+  expect(await after(['npm test', 'npm test NONZERO'])).toMatchObject({ tests: 'unknown' })
+  expect(await after(['npm test', 'npm test --version'])).toMatchObject({ tests: 'unknown' })
+  // Commands that touch no check leave it as it was.
+  expect(await after(['npm test', 'git status', 'ls | wc -l', 'echo FAIL'])).toMatchObject({ tests: 'passed' })
+})
+
+test('a failed chain is not blamed on the check in it', { options: KEY }, async ($, on) => {
+  const { body, clock } = world(on, jevSays('done', 0.95, ['production', 0.95]))
+  for (const command of ['cd /missing && npm test FAIL', 'source broken.sh && npm test FAIL', 'export X=1 && pytest FAIL']) {
+    await runTurn($, { bash: [command] })
+    await clock.settle()
+    expect(body().state.observed_checks.tests).toBe('unknown')
+    // So it doesn't block production either.
+    await expectBand($, '▲ production 95%')
+  }
+})
+
+test('tool results that outlive their turn are not counted in the next', { options: KEY }, async ($, on) => {
+  const { body, clock, release } = world(on, jevSays('done', 0.95))
+  await $.prompt.submit({ text: 'first', wait: false, origin: { kind: 'composer' } })
+  const lateTests = $.tool.call({ tool: 'Bash', command: 'npm test SLOW' })
+  const lateError = $.tool.call({ tool: 'Bash', command: 'npm run lint SLOW FAIL' })
+
+  await $.prompt.submit({ text: 'second', wait: false, origin: { kind: 'composer' } })
+  release()
+  await Promise.all([lateTests, lateError])
+  await $.turn.complete({ answer: 'Done.', durationMs: 1, isAborted: false, turnId: 't2', reason: 'answer' })
+  await clock.settle()
+
+  const { state } = body()
+  expect(state.user_request).toBe('second')
+  expect(state.observed_checks).toEqual({ tests: 'unknown', build: 'unknown', typecheck: 'unknown', lint: 'unknown' })
+  expect(state.tool_error_count).toBe(0)
+  expect(state.tool_errors).toEqual([])
 })
 
 test('production cannot stand against a check seen failing', { options: KEY }, async ($, on) => {

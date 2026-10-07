@@ -9,7 +9,7 @@
       "name": "jev-status",
       "source": "./plugins/jev-status",
       "description": "Asks TypeSafe Jev after each turn where the task stands and how ready its deployable work is, and shows both above the prompt",
-      "version": "0.6.0"
+      "version": "0.6.1"
     }
   ]
 }

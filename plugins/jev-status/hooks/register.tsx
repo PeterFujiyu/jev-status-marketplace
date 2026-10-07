@@ -128,8 +128,10 @@ const ALIASES: Record<string, string> = { needsaction: 'needaction', nothingtode
 
 // ——— Observed checks ———
 // The plugin sees each Bash command and whether it ended in an error (a
-// non-zero exit). It counts a command as a check only when that exit status
-// speaks for it: no pipes, `;` lists or background jobs, only `&&` chains.
+// non-zero exit). A check passes only when the exit status speaks for an actual
+// run of it: a plain command or an `&&` chain, not a version, help, listing or
+// dry run. A run whose outcome can't be told (piped, `;`, background, a failed
+// chain) resets that check to unknown, so an older pass never stands for it.
 
 const CHECKS: readonly Check[] = ['tests', 'build', 'typecheck', 'lint']
 
@@ -160,8 +162,19 @@ const RULES: [Check, RegExp][] = [
 
 const base = (word: string) => word.replace(/^.*\//, '')
 
-/** Which check one simple command runs, if any. */
-function checkOf(command: string): Check | undefined {
+// Arguments that make a check command report on itself instead of verifying anything.
+const NOT_A_RUN =
+  /\s(--version|-V|--help|-h|--dry-run|--dryrun|--list|-list|--list-tests|--listTests|--collect-only|--co|--no-run|--showConfig|--show-config|--print-config|--init|--watch|--just-print)(?=[\s=]|$)/
+
+/** Whether a check command, as `line` spells it, really verifies. */
+const verifies = (line: string) =>
+  !NOT_A_RUN.test(line) &&
+  !/^(tsc|vue-tsc) (.* )?-v( |$)/.test(line) && // tsc -v is its version
+  !/^(vitest|jest) (list|watch)\b/.test(line) &&
+  !/^make (.* )?-n( |$)/.test(line)
+
+/** Which check one simple command runs, if any, and whether it really verifies. */
+function checkOf(command: string): { check: Check; verifies: boolean } | undefined {
   let words = command.split(/\s+/).filter(Boolean)
   // Variable assignments, and launchers that only start the real tool.
   for (;;) {
@@ -173,27 +186,35 @@ function checkOf(command: string): Check | undefined {
   }
   if (words.length === 0) return undefined
   const line = [base(words[0]!), ...words.slice(1)].join(' ')
-  return RULES.find(([, re]) => re.test(line))?.[0]
+  const check = RULES.find(([, re]) => re.test(line))?.[0]
+  return check === undefined ? undefined : { check, verifies: verifies(line) }
 }
 
-const TRIVIAL = /^(cd|pushd|popd|export|source|\.|set|unset|true)\b|^\w+=\S*$/
+/** How a Bash call ended: exit 0, an error exit, or an end that says nothing (interrupted, backgrounded). */
+type Outcome = 'ok' | 'failed' | 'unclear'
 
-/** What a Bash command's exit status says about the checks it ran. */
-function observe(command: string, failed: boolean): [Check, Observed][] {
+/**
+ * What a Bash command's outcome says about the checks it touched: passed or
+ * failed when it speaks for them, unknown when a check ran but its result
+ * can't be told; nothing for commands that touch no check.
+ */
+function observe(command: string, outcome: Outcome): [Check, Observed][] {
   const flat = command
     .replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, 'Q') // quoted text cannot split commands
     .replace(/\d*>&\d*|&>|<&\d*/g, ' ') // redirections, not operators
-  if (/[|;&\n]/.test(flat.replace(/&&/g, ''))) return []
-  const parts = flat.split('&&').map(s => s.trim()).filter(Boolean)
-  const kinds = parts.map(checkOf)
-  const found = [...new Set(kinds.filter((k): k is Check => k !== undefined))]
-  // Success: every part of an && chain ran and passed.
-  if (!failed) return found.map((c): [Check, Observed] => [c, 'passed'])
-  // Failure: only when one check could have failed it.
-  const others = parts.filter((_, i) => kinds[i] === undefined)
-  return found.length === 1 && kinds.filter(k => k !== undefined).length === 1 && others.every(p => TRIVIAL.test(p))
-    ? [[found[0]!, 'failed']]
-    : []
+  const parts = flat.split(/&&|\|\||[|;&\n]/).map(s => s.trim()).filter(Boolean)
+  const seen = parts.map(checkOf)
+  const touched = [...new Set(seen.flatMap(s => (s ? [s.check] : [])))]
+  const unknown = () => touched.map((c): [Check, Observed] => [c, 'unknown'])
+  if (touched.length === 0) return []
+  // Pipes, ; lists, || and background jobs: the exit status may belong to another command.
+  if (outcome === 'unclear' || /[|;&\n]/.test(flat.replace(/&&/g, ''))) return unknown()
+  // Success: every part of the && chain ran and exited 0; a check passed if a real run of it did.
+  if (outcome === 'ok') {
+    return touched.map((c): [Check, Observed] => [c, seen.some(s => s?.check === c && s.verifies) ? 'passed' : 'unknown'])
+  }
+  // Failure: only a lone real run is to blame; in a chain, any step (a cd, a source) may have failed.
+  return parts.length === 1 && seen[0]!.verifies ? [[seen[0]!.check, 'failed']] : unknown()
 }
 
 // ——— Judging ———
@@ -462,9 +483,14 @@ export const register: Register = (on, options) => {
   let checks = unknownChecks()
   // Bumped by every new turn and every judgement started: an older one can't settle.
   let epoch = 0
+  // Bumped by every new turn only: tool results are kept for the turn they started in.
+  let turnNo = 0
+  // The turn each subagent was first seen in: a background one may outlive it.
+  const agentTurn = new Map<string, number>()
 
   on('prompt.submit', async ($, e, next) => {
     epoch += 1
+    turnNo += 1
     // A background task's notification starts a turn too, but the request stays the user's last.
     if (e.origin.kind !== 'task-notification') prompt = clip(e.text, MAX_PROMPT_CHARS)
     errors = []
@@ -479,9 +505,13 @@ export const register: Register = (on, options) => {
     .catch(() => undefined)
 
   on('tool.call', async ($, e, next) => {
+    const started = turnNo
+    if (e.agentId !== undefined && !agentTurn.has(e.agentId)) agentTurn.set(e.agentId, started)
     const ran = await next(e)
     try {
-      record(e, ran)
+      // Only this turn's own work: not a call that outlived its turn, nor an earlier turn's background subagent.
+      const owner = e.agentId === undefined ? started : agentTurn.get(e.agentId)
+      if (started === turnNo && owner === turnNo) record(e, ran)
     } catch {
       // Bookkeeping only: the tool's result goes back unchanged whatever happens here.
     }
@@ -503,11 +533,12 @@ export const register: Register = (on, options) => {
         returnCodeInterpretation?: string
       }
       // A non-zero exit Claude Code read as no error (returnCodeInterpretation) is no pass either.
-      const settled =
-        !out.interrupted && out.backgroundTaskId === undefined && out.timedOutAfterMs === undefined &&
-        out.returnCodeInterpretation === undefined &&
-        !(ran.isError === true && /interrupt|timed out|background/i.test(ran.text ?? ''))
-      if (settled) for (const [c, o] of observe(e.command, ran.isError === true)) checks[c] = o
+      const unclear =
+        out.interrupted === true || out.backgroundTaskId !== undefined || out.timedOutAfterMs !== undefined ||
+        out.returnCodeInterpretation !== undefined ||
+        (ran.isError === true && /interrupt|timed out|background/i.test(ran.text ?? ''))
+      const outcome: Outcome = unclear ? 'unclear' : ran.isError === true ? 'failed' : 'ok'
+      for (const [c, o] of observe(e.command, outcome)) checks[c] = o
     }
   }
 

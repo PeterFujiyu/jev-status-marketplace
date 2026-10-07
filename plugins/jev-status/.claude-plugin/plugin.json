@@ -1,6 +1,6 @@
 {
   "name": "jev-status",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "After each turn asks TypeSafe Jev two independent questions, where the task stands (done, needaction, failed) and how ready its deployable work is (production, development, nodeploy, nothing), with Claude as a second opinion and a fail-closed 'needs review' for deploy, and shows both above the prompt",
   "author": {
     "name": "peter"
