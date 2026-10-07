@@ -1,6 +1,7 @@
 {
   "name": "peter-plugins",
   "owner": { "name": "peter" },
+  "description": "Peter's Claude Code plugins",
   "plugins": [
     {
       "name": "jev-status",
