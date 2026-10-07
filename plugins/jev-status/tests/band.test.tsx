@@ -299,6 +299,15 @@ test('with the deploy check off, only the status is asked and shown', { options:
   expect(toasts).toEqual(['done (90%)'])
 })
 
+test('a verdict kept from 0.4.0 is ignored, not drawn', { options: { api_key: 'k-test' } }, async ($, on) => {
+  world(on, jevSays('done', 1))
+  // 0.4.0 kept { status: 'done', source: 'jev', confidence } under the same key.
+  const old = { status: 'done', source: 'jev', confidence: 0.9 }
+  on('state.get', (_$, e, next) => (e.key === 'verdict' ? { value: { value: old, version: 1 } } : next(e)) as never)
+
+  for (const surface of SURFACES) expect(await bandText($, surface)).not.toContain('JEV')
+})
+
 test('an interrupted turn is not sent and shows nothing', { options: { api_key: 'k-test' } }, async ($, on) => {
   const { sent, completes, clock } = world(on, jevSays('done', 1))
   await runTurn($, 'aborted')

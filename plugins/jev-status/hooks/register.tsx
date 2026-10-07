@@ -355,7 +355,9 @@ export const register: Register = (on, options) => {
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
     const p = await read($, phase)
-    const v = await read($, verdict)
+    // A verdict kept from an earlier version of the plugin has another shape: ignore it.
+    const kept = await read($, verdict)
+    const v = typeof kept?.status === 'object' && kept.status !== null ? kept : null
     if (e.props.hasSurvey || e.props.isWorking || p === 'running' || (p === 'idle' && v === null)) {
       return next(e)
     }
@@ -370,15 +372,18 @@ export const register: Register = (on, options) => {
       )
     }
 
-    const row = (title: string, look: Look, a: Answer) => (
-      <Box>
-        <Text dimColor>{title}</Text>
-        <Text bold color={look.color} dimColor={look.color === undefined}>
-          {look.label}
-        </Text>
-        <Text dimColor>{detail(a)}</Text>
-      </Box>
-    )
+    const row = (title: string, looks: Record<string, Look>, a: Answer) => {
+      const look = looks[a.choice] ?? { label: String(a.choice) }
+      return (
+        <Box>
+          <Text dimColor>{title}</Text>
+          <Text bold color={look.color} dimColor={look.color === undefined}>
+            {look.label}
+          </Text>
+          <Text dimColor>{detail(a)}</Text>
+        </Box>
+      )
+    }
     const { status, deploy } = v!
     // Without a key, or when Jev failed for both, the deploy row would only repeat the status row.
     const showDeploy =
@@ -388,8 +393,8 @@ export const register: Register = (on, options) => {
 
     return (
       <Box flexDirection="column">
-        {row(showDeploy ? 'JEV task:   ' : 'JEV: ', LOOK.status[status.choice], status)}
-        {showDeploy ? row('JEV deploy: ', LOOK.deploy[deploy.choice], deploy) : null}
+        {row(showDeploy ? 'JEV task:   ' : 'JEV: ', LOOK.status, status)}
+        {showDeploy ? row('JEV deploy: ', LOOK.deploy, deploy) : null}
       </Box>
     )
   })

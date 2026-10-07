@@ -1,6 +1,6 @@
 {
   "name": "jev-status",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "After each turn asks TypeSafe Jev whether the task is done, needaction or failed, and whether the work may be deployed to production, development only, or not directly (Claude gives a second opinion when Jev is unsure), and shows both above the prompt",
   "author": {
     "name": "peter"
