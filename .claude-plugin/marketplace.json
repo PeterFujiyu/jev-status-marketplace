@@ -7,7 +7,7 @@
       "name": "jev-status",
       "source": "./plugins/jev-status",
       "description": "Asks TypeSafe Jev whether each turn left the task done, needaction or failed, and shows the verdict above the prompt",
-      "version": "0.2.0"
+      "version": "0.2.1"
     }
   ]
 }

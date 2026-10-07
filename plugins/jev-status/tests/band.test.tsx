@@ -18,7 +18,12 @@ type Sent = { url: string; init?: HttpInit }
 // with `reply`, and pass-through answers for the events the plugin hooks.
 function world(on: On, reply: { status: number; body: unknown }) {
   const sent: Sent[] = []
+  const toasts: string[] = []
   const clock = mock.clock(on, { now: 1_800_000_000_000 })
+  on('ui.toast', (_$, e) => {
+    toasts.push(e.text)
+    return { value: undefined }
+  })
   mock.env(on, { HOME: '/h' })
   on('fs.exists', () => ({ value: false }))
   on('http.fetch', (_$, e) => {
@@ -33,7 +38,7 @@ function world(on: On, reply: { status: number; body: unknown }) {
     const { Box } = $.ui.resolve(e)
     return <Box />
   })
-  return { sent, clock }
+  return { sent, toasts, clock }
 }
 
 async function runTurn($: Engine, reason: 'answer' | 'aborted' = 'answer') {
@@ -60,7 +65,7 @@ const NEEDACTION = {
 }
 
 test('asks Jev with the configured key and shows its verdict', { options: { api_key: 'k-test' } }, async ($, on) => {
-  const { sent, clock } = world(on, NEEDACTION)
+  const { sent, toasts, clock } = world(on, NEEDACTION)
   await runTurn($)
 
   for (const surface of SURFACES) expect(await bandText($, surface)).toContain('checking')
@@ -83,6 +88,8 @@ test('asks Jev with the configured key and shows its verdict', { options: { api_
     expect(text).toContain('needs action')
     expect(text).toContain('90%')
   }
+  // The toast already carries the plugin's name and shows no color: words only.
+  expect(toasts).toEqual(['needs action (90%)'])
 })
 
 test('without a key it says so and sends nothing', async ($, on) => {

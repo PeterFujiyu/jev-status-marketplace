@@ -1,6 +1,6 @@
 {
   "name": "jev-status",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Asks TypeSafe Jev whether each turn left the task done, needaction or failed, and shows the verdict above the prompt",
   "author": { "name": "peter" },
   "types": "./types/index.d.ts",

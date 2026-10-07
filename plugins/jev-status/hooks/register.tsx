@@ -35,12 +35,14 @@ const QUESTION = {
   },
 }
 
-const LOOK: Record<Verdict['status'], { color?: string; label: string }> = {
-  done: { color: 'green', label: '✔ done' },
-  needaction: { color: 'yellow', label: '● needs action' },
-  failed: { color: 'red', label: '✘ failed' },
-  nokey: { label: 'no TypeSafe API key (set it in /plugin)' },
-  error: { label: 'Jev error' },
+// `label` is drawn in color above the prompt; `words` is the plain text for a
+// toast, which shows no color and already carries the plugin's name.
+const LOOK: Record<Verdict['status'], { color?: string; label: string; words: string }> = {
+  done: { color: 'green', label: '✔ done', words: 'done' },
+  needaction: { color: 'yellow', label: '● needs action', words: 'needs action' },
+  failed: { color: 'red', label: '✘ failed', words: 'failed' },
+  nokey: { label: 'no TypeSafe API key (set it in /plugin)', words: 'no TypeSafe API key' },
+  error: { label: 'Jev error', words: 'Jev error' },
 }
 
 type Turn = { prompt: string; answer: string; errors: string[] }
@@ -116,8 +118,9 @@ export const register: Register = (on, options) => {
       await update($, verdict, () => v)
       await update($, phase, (): Phase => 'idle')
       if (options.toast !== false && v.status !== 'nokey') {
-        const conf = typeof v.confidence === 'number' ? ` (${Math.round(v.confidence * 100)}%)` : ''
-        $.ui.toast(`JEV: ${LOOK[v.status].label}${conf}`)
+        const detail =
+          typeof v.confidence === 'number' ? ` (${Math.round(v.confidence * 100)}%)` : v.error ? ` (${v.error})` : ''
+        $.ui.toast(`${LOOK[v.status].words}${detail}`)
       }
     }
 
