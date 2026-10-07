@@ -1,6 +1,6 @@
 {
   "name": "jev-status",
-  "version": "0.7.0",
+  "version": "0.7.1",
   "description": "After each turn asks TypeSafe Jev two independent questions, where the task stands (done, needaction, failed) and the highest safe delivery level of the session's current active work (production, development, blocked, na), with Claude as a second opinion and a fail-closed 'needs review' for ship, and shows both above the prompt",
   "author": {
     "name": "peter"
@@ -23,8 +23,7 @@
     "ship_check": {
       "type": "boolean",
       "title": "Ship check",
-      "description": "Also ask the highest safe delivery level of the session's current active work: production, development, blocked, or n/a",
-      "default": true
+      "description": "Also ask the highest safe delivery level of the session's current active work: production, development, blocked, or n/a. On unless turned off here (or under 0.6's Deploy check, when this is left unset)."
     },
     "claude_below": {
       "type": "number",
@@ -72,6 +71,17 @@
       "title": "Ask Claude when Jev can't answer",
       "description": "With no TypeSafe key or a Jev error, ask Claude instead of showing the error",
       "default": true
+    },
+    "deploy_check": {
+      "type": "boolean",
+      "title": "Deploy check (0.6, replaced by Ship check)",
+      "description": "Kept so a value set in 0.6 still applies while Ship check is unset. Use Ship check instead."
+    },
+    "deploy_below": {
+      "type": "number",
+      "title": "Deploy threshold (0.6, replaced by Ship threshold)",
+      "description": "Kept so a value set in 0.6 still applies while Ship threshold is unset. Use Ship threshold instead.",
+      "required": false
     }
   }
 }

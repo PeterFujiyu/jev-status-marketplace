@@ -204,13 +204,14 @@ test('a greeting is needaction with n/a', { options: KEY }, async ($, on) => {
 })
 
 test('task and ship combine freely', { options: KEY }, async ($, on) => {
-  const { replies, clock } = world(on, jevSays('done', 0.9))
+  // An n/a after a turn with active work is reviewed; here the review agrees.
+  const { replies, clock } = world(on, jevSays('done', 0.9), 'unused', 'ship: na')
   const combos: [string, string, string, string][] = [
     ['done', 'production', '✔ done 90%', '▲ production 90%'],
     ['done', 'development', '✔ done 90%', '◆ development 90%'],
-    ['done', 'na', '✔ done 90%', '– n/a 90%'],
+    ['done', 'na', '✔ done 90%', '– n/a'],
     ['needaction', 'production', '● needs action 90%', '▲ production 90%'], // ready, waiting for a go-ahead
-    ['needaction', 'na', '● needs action 90%', '– n/a 90%'],
+    ['needaction', 'na', '● needs action 90%', '– n/a'],
     ['failed', 'blocked', '✘ failed 90%', '■ blocked 90%'],
     ['done', 'blocked', '✔ done 90%', '■ blocked 90%'], // finished, but a risky migration
   ]
@@ -405,25 +406,57 @@ test('a turn that delivers work sends ship to the session context even when Jev 
   expect(forks[0]).not.toContain('needaction')
   await expectBand($, '▲ production · Claude, session context (Jev 99%)')
 
-  // When the review can't tell, Jev's confident answer stands.
-  replies.session = 'ship: unclear'
+  // When the review can't tell, or fails, Jev's confidence counts for nothing here: needs review.
+  for (const reply of ['ship: unclear', 'refuse']) {
+    replies.session = reply
+    await turn(['git push'])
+    await clock.settle()
+    await expectBand($, '? needs review · Jev suggested development 99%')
+  }
+  replies.jev = jevSays('done', 0.98, ['na', 0.97])
   await turn(['git push'])
   await clock.settle()
-  await expectBand($, '◆ development 99%')
+  await expectBand($, '? needs review · Jev suggested na 97%')
+  replies.jev = jevSays('done', 0.98, ['development', 0.99])
 
   replies.session = 'ship: production'
-  for (const command of ['gh pr merge 42 --squash', 'cd app && git push -u origin feat', 'npm publish', 'GIT_TRACE=1 git push 2>&1 | tail -3', 'terraform apply -auto-approve', 'git merge feat FAIL']) {
+  for (const command of ['git -C /repo push', 'git -c http.extraHeader=x --no-pager push origin main', 'git --git-dir .git --work-tree . merge feat', 'gh pr merge 42 --squash', 'cd app && git push -u origin feat', 'npm publish', 'GIT_TRACE=1 git push 2>&1 | tail -3', 'terraform apply -auto-approve', 'git merge feat FAIL']) {
     const before = forks.length
     await turn([command])
     await clock.settle()
     expect(forks.length).toBe(before + 1)
   }
-  for (const command of ['git status', 'git log --oneline | head', 'echo git push', 'git commit -m "wip; git push later"']) {
+  for (const command of ['git status', 'git -C /repo status', 'git log --oneline | head', 'echo git push', 'git commit -m "wip; git push later"']) {
     const before = forks.length
     await turn([command])
     await clock.settle()
     expect(forks.length).toBe(before)
   }
+})
+
+test('an n/a right after a turn with active work is reviewed, even when Jev is sure', { options: KEY }, async ($, on) => {
+  const { replies, forks, clock } = world(on, jevSays('done', 0.95, ['production', 0.92]), 'unused', 'ship: production')
+  await runTurn($, { prompt: 'Fix the login bug.', bash: ['npm test'], answer: 'Fixed; tests pass.' })
+  await clock.settle()
+  expect(forks.length).toBe(0)
+
+  // The next turn only approves the work: no command, and Jev, seeing only it, is sure of n/a.
+  replies.jev = jevSays('done', 0.97, ['na', 0.96])
+  await runTurn($, { prompt: 'Approved, ship it.', answer: 'Great, it is approved and ready.' })
+  await clock.settle()
+  expect(forks.length).toBe(1)
+  await expectBand($, '▲ production · Claude, session context (Jev 96%)')
+
+  // The review finds the session really has nothing active: n/a, and the next confident n/a stands.
+  replies.session = 'ship: na'
+  await runTurn($, { prompt: 'Thanks! Unrelated: what is a monad?', answer: 'A monad is …' })
+  await clock.settle()
+  expect(forks.length).toBe(2)
+  await expectBand($, '– n/a · Claude, session context (Jev 96%)')
+  await runTurn($, { prompt: 'And a functor?', answer: 'A functor is …' })
+  await clock.settle()
+  expect(forks.length).toBe(2)
+  await expectBand($, '– n/a 96%')
 })
 
 test('a threshold of 0 opts delivery turns out of the review too', { options: { ...KEY, claude_below: 0 } }, async ($, on) => {
@@ -877,6 +910,35 @@ test(
     expect(toasts).toEqual(['done (90%)'])
   },
 )
+
+test('deploy_check off from 0.6 keeps the ship question off', { options: { ...KEY, deploy_check: false } }, async ($, on) => {
+  const { body, clock } = world(on, jevSays('done', 0.95))
+  await runTurn($)
+  await clock.settle()
+  expect(Object.keys(body().questions)).toEqual(['status'])
+})
+
+test('ship_check set wins over 0.6\'s deploy_check', { options: { ...KEY, deploy_check: false, ship_check: true } }, async ($, on) => {
+  const { body, clock } = world(on, jevSays('done', 0.95))
+  await runTurn($)
+  await clock.settle()
+  expect(Object.keys(body().questions)).toEqual(['status', 'ship'])
+})
+
+test('deploy_below from 0.6 applies while ship_below is unset', { options: { ...KEY, deploy_below: 50 } }, async ($, on) => {
+  const { forks, clock } = world(on, jevSays('done', 0.95, ['development', 0.6]), 'unused', 'ship: production')
+  await runTurn($)
+  await clock.settle()
+  expect(forks.length).toBe(0)
+  await expectBand($, '◆ development 60%')
+})
+
+test('ship_below set wins over 0.6\'s deploy_below', { options: { ...KEY, deploy_below: 50, ship_below: 70 } }, async ($, on) => {
+  const { forks, clock } = world(on, jevSays('done', 0.95, ['development', 0.6]), 'unused', 'ship: production')
+  await runTurn($)
+  await clock.settle()
+  expect(forks.length).toBe(1)
+})
 
 test('a verdict kept from 0.4.0 is ignored, not drawn', { options: KEY }, async ($, on) => {
   world(on, jevSays('done', 1))

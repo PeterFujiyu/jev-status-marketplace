@@ -51,9 +51,12 @@ protection, approvals or your release policy, and the plugin never pushes or dep
 3. **ship** goes straight to the **session-context review** when:
    - Jev's confidence is under the ship threshold, which includes a low-confidence `n/a`;
    - Jev says `production` under the production threshold;
-   - the turn ran a delivery command (`git push`/`merge`, `gh pr merge`, `npm publish`,
-     `terraform apply`, `… deploy`, …), even if Jev is sure. Jev can't see the earlier turns
-     where that work was written and verified;
+   - the turn ran a delivery command (`git push`/`merge`, also with git options like
+     `git -C /repo push`, `gh pr merge`, `npm publish`, `terraform apply`, `… deploy`, …), even if
+     Jev is sure. Jev can't see the earlier turns where that work was written and verified;
+   - Jev says `n/a`, even confidently, right after a turn whose ship answer had active work
+     (anything but `n/a`): the turn may only be approving or continuing that work. Only that
+     last answer is remembered, no history;
    - or Jev failed and the fallback is on.
 
    The current-turn summary can't show work from earlier turns, so it is skipped for ship.
@@ -70,8 +73,8 @@ reviews, delivery turns included, and Jev's answer then shows as given, even a l
 
 - **task** keeps Jev's low-confidence answer, shown with its percentage.
 - **ship** fails closed: it shows `? needs review` with what Jev suggested, never a low-confidence
-  green `production`. The same happens when the review fails or times out. On a delivery turn
-  where Jev was sure, its answer stands.
+  green `production`. The same happens when the review fails or times out, and on the two kinds
+  of turn above (delivery, n/a after active work), whatever Jev's confidence was.
 
 A Jev error (HTTP failure, invalid JSON, malformed answer) with no Claude answer shows as
 `Jev error (…)`.
@@ -136,10 +139,10 @@ Without a key nothing goes to TypeSafe; Claude judges each turn instead (unless 
 |---|---|---|
 | TypeSafe API key | empty | see above |
 | Toast each verdict | on | also show each verdict as a toast |
-| Ship check | on | also ask the ship question; off shows only the task row |
+| Ship check | on | also ask the ship question; off shows only the task row. Left unset, 0.6's *Deploy check* applies |
 | Ask Claude below (% Jev confidence) | 70 | below this, Claude gives a second opinion on that answer; used for both questions unless overridden below; 0 never asks (delivery turns included) |
 | Task threshold (%) | empty | overrides the above for the task question |
-| Ship threshold (%) | empty | overrides the above for the ship question (a value set as 0.6's *Deploy threshold* still applies) |
+| Ship threshold (%) | empty | overrides the above for the ship question. Left unset, 0.6's *Deploy threshold* applies |
 | Production threshold (%) | empty | a stricter threshold for a `production` answer from Jev; applies only when higher than the ship threshold |
 | Claude's view | summary-then-conversation | for the **task** question: `summary`: only the quick review of what Jev read. `summary-then-conversation`: the same, then the session-context review when the summary isn't enough. `conversation`: always the session-context review. The ship question always uses the session-context review |
 | Claude review model | haiku | model for the summary review: an alias (`haiku`, `sonnet`, `opus`) or a full model id. The session-context review always uses the session's own model, which lets it reuse the prompt cache |
@@ -149,8 +152,9 @@ Claude's reviews use your own Claude Code account and count toward its usage. Th
 Jev is unsure of or can't give, and on ship for turns that push, merge or deploy; one review covers
 every question that needs it.
 
-Upgrading from 0.6: the *Deploy check* option is now *Ship check*. If you had turned it off, turn
-*Ship check* off again.
+Upgrading from 0.6: *Deploy check* and *Deploy threshold* are now *Ship check* and *Ship
+threshold*. The old two stay in the settings menu, marked as replaced, so values you set in 0.6
+keep applying until you set the new ones.
 
 ## What is sent, and privacy
 

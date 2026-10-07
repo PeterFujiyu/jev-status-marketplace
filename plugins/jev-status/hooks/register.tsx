@@ -196,6 +196,12 @@ function normalize(command: string): string | undefined {
     else if (words.length > 2 && runs2) words = words.slice(2)
     else break
   }
+  // git's own options come before its subcommand: `git -C /repo push` is a push.
+  if (base(words[0] ?? '') === 'git') {
+    let i = 1
+    while (i < words.length && words[i]!.startsWith('-')) i += /^(-C|-c|--git-dir|--work-tree|--namespace)$/.test(words[i]!) ? 2 : 1
+    words = [words[0]!, ...words.slice(i)]
+  }
   return words.length === 0 ? undefined : [base(words[0]!), ...words.slice(1)].join(' ')
 }
 
@@ -247,7 +253,17 @@ function observe(command: string, outcome: Outcome): [Check, Observed][] {
 // ——— Judging ———
 
 type Checks = Record<Check, Observed>
-type Turn = { prompt: string; answer: string; errors: string[]; errorCount: number; checks: Checks; delivered: boolean }
+type Turn = {
+  prompt: string
+  answer: string
+  errors: string[]
+  errorCount: number
+  checks: Checks
+  /** The turn ran a delivery command (push, merge, publish, deploy). */
+  delivered: boolean
+  /** The last turn judged had active work: a ship answer other than n/a. */
+  activeBefore: boolean
+}
 
 type ClaudeView = 'summary' | 'summary-then-conversation' | 'conversation'
 
@@ -444,10 +460,13 @@ async function judge($: EngineInterface, s: Settings, turn: Turn): Promise<Verdi
     q === 'status' ? s.taskBelow : a.choice === 'production' ? Math.max(s.shipBelow, s.productionBelow) : s.shipBelow
   const unsure = (q: Question, a: Answer) =>
     !failedAnswer(a) && typeof a.confidence === 'number' && a.confidence * 100 < below(q, a)
-  // A turn that pushes, merges or deploys delivers work from earlier turns Jev can't see: review ship from the session context.
-  const delivery = (q: Question, a: Answer) => q === 'ship' && turn.delivered && !failedAnswer(a) && s.shipBelow > 0
+  // Jev sees only this turn. A turn that pushes, merges or deploys delivers work from earlier
+  // turns, and an n/a right after a turn with active work may only be approving it: in both,
+  // Jev's confidence says nothing about that work, so ship is reviewed from the session context.
+  const continues = (q: Question, a: Answer) =>
+    q === 'ship' && !failedAnswer(a) && s.shipBelow > 0 && (turn.delivered || (turn.activeBefore && a.choice === 'na'))
   const toClaude = qs.filter(
-    q => unsure(q, jev[q]!) || delivery(q, jev[q]!) || (failedAnswer(jev[q]!) && s.claudeOnJevFailure),
+    q => unsure(q, jev[q]!) || continues(q, jev[q]!) || (failedAnswer(jev[q]!) && s.claudeOnJevFailure),
   )
   const claude = toClaude.length > 0 ? await askClaude($, s, turn, toClaude) : {}
 
@@ -463,8 +482,8 @@ async function judge($: EngineInterface, s: Settings, turn: Turn): Promise<Verdi
         confidence: failedAnswer(j) ? undefined : j.confidence,
         error: failedAnswer(j) ? (j.choice === 'nokey' ? 'no Jev key' : `Jev ${j.error ?? 'error'}`) : undefined,
       }
-    } else if (q === 'ship' && unsure(q, j)) {
-      // Fail closed: an unsure ship answer Claude could not settle is not shown as Jev's.
+    } else if (q === 'ship' && (unsure(q, j) || continues(q, j))) {
+      // Fail closed: a ship answer Jev couldn't be trusted on, and Claude couldn't settle, is not shown as Jev's.
       answers[q] = { choice: 'review', source: 'jev', suggested: { choice: j.choice, by: 'jev', confidence: j.confidence } }
     } else {
       answers[q] = j // the task row keeps Jev's answer; a failed ship row stays an error
@@ -491,6 +510,9 @@ function said(look: Look, a: Answer) {
   return `${look.words}${a.source === 'jev' && typeof a.confidence === 'number' ? ` (${pct(a.confidence)})` : detail(a)}`
 }
 
+/** A boolean option, or undefined when unset (an unset field arrives as an empty string). */
+const booleanOption = (v: unknown): boolean | undefined => (typeof v === 'boolean' ? v : undefined)
+
 /** A number option, or undefined when unset or not a number. */
 function numberOption(v: unknown): number | undefined {
   if (typeof v === 'number') return Number.isFinite(v) ? v : undefined
@@ -500,11 +522,13 @@ function numberOption(v: unknown): number | undefined {
 
 export const register: Register = (on, options) => {
   const below = numberOption(options.claude_below) ?? DEFAULT_BELOW
-  // ship_below replaced 0.6's deploy_below; a value kept under the old name still applies.
+  // ship_check and ship_below replaced 0.6's deploy_check and deploy_below, which stay declared so
+  // a value set under the old name still arrives here and applies while the new one is unset.
   const shipBelow = numberOption(options.ship_below) ?? numberOption(options.deploy_below) ?? below
+  const shipCheck = booleanOption(options.ship_check) ?? booleanOption(options.deploy_check)
   const settings: Settings = {
     apiKey: options.api_key,
-    questions: options.ship_check === false ? ['status'] : ['status', 'ship'],
+    questions: shipCheck === false ? ['status'] : ['status', 'ship'],
     taskBelow: numberOption(options.task_below) ?? below,
     shipBelow,
     productionBelow: numberOption(options.production_below) ?? shipBelow,
@@ -519,6 +543,8 @@ export const register: Register = (on, options) => {
   let errorCount = 0
   let checks = unknownChecks()
   let delivered = false
+  // Whether the last ship answer shown had active work (anything but n/a); Jev errors leave it as it was.
+  let activeBefore = false
   // Bumped by every new turn and every judgement started: an older one can't settle.
   let epoch = 0
   // Bumped by every new turn only: tool results are kept for the turn they started in.
@@ -594,7 +620,7 @@ export const register: Register = (on, options) => {
     }
 
     const mine = ++epoch
-    const turn: Turn = { prompt, answer: clip(e.answer, MAX_ANSWER_CHARS), errors, errorCount, checks: { ...checks }, delivered }
+    const turn: Turn = { prompt, answer: clip(e.answer, MAX_ANSWER_CHARS), errors, errorCount, checks: { ...checks }, delivered, activeBefore }
     await update($, phase, (): Phase => 'checking')
 
     let settled = false
@@ -604,6 +630,8 @@ export const register: Register = (on, options) => {
       settled = true
       await update($, verdict, () => v)
       await update($, phase, (): Phase => 'idle')
+      const shipped = v.ship?.choice
+      if (shipped !== undefined && shipped !== 'nokey' && shipped !== 'error') activeBefore = shipped !== 'na'
       if (options.toast !== false && v.status.choice !== 'nokey') {
         const ship = v.ship ? ` · ship: ${said(LOOK.ship[v.ship.choice], v.ship)}` : ''
         $.ui.toast(`${said(LOOK.status[v.status.choice], v.status)}${ship}`)
