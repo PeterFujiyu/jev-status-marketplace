@@ -2,10 +2,12 @@
 
 A Claude Code plugin that asks [TypeSafe Jev](https://typesafe.ai) after every turn whether
 your task is **done**, **needs action** from you, or **failed**, and shows the answer above
-the prompt (terminal and the desktop Code tab), plus a short toast.
+the prompt (terminal, the desktop Code tab, VS Code), plus a short toast. When Jev is unsure,
+it asks Claude for a second opinion and shows that instead.
 
 ```
-JEV: ● needs action 100%
+JEV: ● needs action 96%
+JEV: ✘ failed · Claude (Jev 55%)
 ```
 
 ## Install
@@ -22,7 +24,7 @@ that is set:
 2. the `TYPESAFE_API_KEY` environment variable,
 3. the file `~/.config/typesafe/api_key`.
 
-Without a key the band says so and nothing is sent.
+Without a key nothing goes to TypeSafe; Claude judges each turn instead (unless you turn that off).
 
 ## Options
 
@@ -30,6 +32,13 @@ Without a key the band says so and nothing is sent.
 |---|---|---|
 | TypeSafe API key | empty | see above |
 | Toast each verdict | on | also show each verdict as a toast |
+| Ask Claude below (% Jev confidence) | 70 | below this, Claude gives a second opinion and its answer is shown; 0 never asks |
+| Claude's view | summary | `summary`: Claude reads what Jev read. `conversation`: Claude reads the whole session (more accurate, more tokens; always the session's own model) |
+| Claude review model | haiku | model for the `summary` view: an alias (`haiku`, `sonnet`, `opus`) or a full model id |
+| Ask Claude when Jev can't answer | on | with no TypeSafe key or a Jev error, Claude answers instead of an error showing |
+
+Claude's reviews use your own Claude Code account and count toward its usage. They only run on
+turns where Jev is unsure or can't answer.
 
 ## What is sent
 
@@ -42,6 +51,7 @@ goes to `https://api.typesafe.ai/v1/systemone` containing:
 - the fixed question asking for `done`, `needaction` or `failed`.
 
 Nothing else: no files, no other tool output, no earlier turns. Subagent turns are not sent.
+Claude's second opinion goes to Anthropic through Claude Code, like the session itself.
 
 ## Requirements
 

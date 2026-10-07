@@ -1,22 +1,34 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Phase, Verdict } from '../types'
+import type { Phase, Status, Verdict } from '../types'
 
 // After each turn, asks TypeSafe Jev whether the user's task is done, waiting
-// on the user, or failed, and draws the answer above the prompt.
-// Sent per turn: the user's prompt, Claude's final answer and up to three tool
-// errors from that turn. Nothing else.
+// on the user, or failed, and draws the answer above the prompt. When Jev is
+// unsure (or can't answer), asks Claude for a second opinion and shows that.
+// Sent to TypeSafe per turn: the user's prompt, Claude's final answer and up to
+// three tool errors from that turn. Nothing else.
 
 const verdict = atom({ plugin: 'jev-status', key: 'verdict' } as const, null)
 const phase = atom({ plugin: 'jev-status', key: 'phase' } as const, 'idle')
 
 const API_URL = 'https://api.typesafe.ai/v1/systemone'
-const GIVE_UP_MS = 60_000
+const GIVE_UP_MS = 120_000
+const CLAUDE_TIMEOUT_MS = 45_000
 const MAX_PROMPT_CHARS = 2000
 const MAX_ANSWER_CHARS = 4000
 const MAX_ERRORS = 3
 const MAX_ERROR_CHARS = 300
+
+const CRITERIA: Record<Status, string> = {
+  done: 'The agent finished what was asked and reports the result; nothing is required from the user.',
+  needaction:
+    'The agent stopped to wait for the user: it asks a question, needs a decision, approval, ' +
+    'credentials, or a manual step the user must do before work can continue.',
+  failed:
+    'The agent could not complete the task: it hit errors it did not resolve, gave up, ' +
+    'or reports that the result does not work.',
+}
 
 const QUESTION = {
   type: 'choice',
@@ -24,16 +36,20 @@ const QUESTION = {
     '`state` is the end of one turn of an AI coding agent. `user_request` is what the user asked, ' +
     "`agent_final_message` is the agent's last message before it stopped, and `tool_errors` are " +
     "errors from tools it ran during the turn. What is the status of the user's task now?",
-  criteria: {
-    done: 'The agent finished what was asked and reports the result; nothing is required from the user.',
-    needaction:
-      'The agent stopped to wait for the user: it asks a question, needs a decision, approval, ' +
-      'credentials, or a manual step the user must do before work can continue.',
-    failed:
-      'The agent could not complete the task: it hit errors it did not resolve, gave up, ' +
-      'or reports that the result does not work.',
-  },
+  criteria: CRITERIA,
 }
+
+const RUBRIC = (Object.keys(CRITERIA) as Status[]).map(s => `${s}: ${CRITERIA[s]}`).join('\n')
+
+const REVIEW_SYSTEM =
+  "You judge the status of a user's task at the end of one turn of an AI coding agent. " +
+  'Reply with exactly one word: done, needaction or failed.\n\n' +
+  RUBRIC
+
+const FORK_PROMPT =
+  "Step outside the conversation for a moment. Judge the status of the user's task as of your " +
+  'last message. Reply with exactly one word: done, needaction or failed.\n\n' +
+  RUBRIC
 
 // `label` is drawn in color above the prompt; `words` is the plain text for a
 // toast, which shows no color and already carries the plugin's name.
@@ -46,6 +62,33 @@ const LOOK: Record<Verdict['status'], { color?: string; label: string; words: st
 }
 
 type Turn = { prompt: string; answer: string; errors: string[] }
+
+type Settings = {
+  apiKey: unknown
+  claudeBelow: number
+  claudeView: 'summary' | 'conversation'
+  reviewModel: string
+  claudeOnJevFailure: boolean
+}
+
+const pct = (n: number) => `${Math.round(n * 100)}%`
+
+/** What the verdict says beyond its status: its confidence, or who answered and why. */
+function detail(v: Verdict): string {
+  if (v.source === 'claude') {
+    return ` · Claude (${typeof v.confidence === 'number' ? `Jev ${pct(v.confidence)}` : (v.error ?? 'Jev unsure')})`
+  }
+  if (typeof v.confidence === 'number') return ` ${pct(v.confidence)}`
+  return v.status === 'error' && v.error ? ` (${v.error})` : ''
+}
+
+function parseStatus(text: string): Status | undefined {
+  const word = text.toLowerCase().replace(/[^a-z ]/g, ' ')
+  if (/\bneed(s)? ?action\b/.test(word)) return 'needaction'
+  if (/\bfailed\b/.test(word)) return 'failed'
+  if (/\bdone\b/.test(word)) return 'done'
+  return undefined
+}
 
 async function apiKey($: EngineInterface, configured: unknown): Promise<string> {
   if (typeof configured === 'string' && configured.trim()) return configured.trim()
@@ -65,15 +108,62 @@ async function askJev($: EngineInterface, key: string, turn: Turn): Promise<Verd
       questions: { status: QUESTION },
     }),
   })
-  if (!res.ok) return { status: 'error', error: `HTTP ${res.status}` }
+  if (!res.ok) return { status: 'error', source: 'jev', error: `HTTP ${res.status}` }
   const answer = JSON.parse(res.text)?.answers?.status
   if (!['done', 'needaction', 'failed'].includes(answer?.choice)) {
-    return { status: 'error', error: 'unexpected response' }
+    return { status: 'error', source: 'jev', error: 'unexpected response' }
   }
-  return { status: answer.choice, confidence: answer.confidence }
+  return { status: answer.choice, source: 'jev', confidence: answer.confidence }
+}
+
+/** Claude's one-word judgement, or undefined when it gave none. */
+async function askClaude($: EngineInterface, s: Settings, turn: Turn): Promise<Status | undefined> {
+  const reply =
+    s.claudeView === 'conversation'
+      ? await $.model.fork({ prompt: FORK_PROMPT })
+      : await $.model.complete({
+          model: s.reviewModel,
+          system: REVIEW_SYSTEM,
+          prompt: JSON.stringify({
+            user_request: turn.prompt,
+            agent_final_message: turn.answer,
+            tool_errors: turn.errors,
+          }),
+          maxTokens: 16,
+          timeoutMs: CLAUDE_TIMEOUT_MS,
+        })
+  return reply.isAnswered ? parseStatus(reply.text) : undefined
+}
+
+async function judge($: EngineInterface, s: Settings, turn: Turn): Promise<Verdict> {
+  const key = await apiKey($, s.apiKey)
+  const jev: Verdict = key ? await askJev($, key, turn) : { status: 'nokey', source: 'jev' }
+
+  const jevFailed = jev.status === 'nokey' || jev.status === 'error'
+  const jevUnsure = !jevFailed && typeof jev.confidence === 'number' && jev.confidence * 100 < s.claudeBelow
+  if (!(jevUnsure || (jevFailed && s.claudeOnJevFailure))) return jev
+
+  const claude = await askClaude($, s, turn).catch(() => undefined)
+  if (claude === undefined) return jev // Claude gave no usable answer: Jev's stands
+
+  return {
+    status: claude,
+    source: 'claude',
+    confidence: jevUnsure ? jev.confidence : undefined,
+    error: jevFailed ? (jev.status === 'nokey' ? 'no Jev key' : `Jev ${jev.error ?? 'error'}`) : undefined,
+  }
 }
 
 export const register: Register = (on, options) => {
+  const settings: Settings = {
+    apiKey: options.api_key,
+    claudeBelow: typeof options.claude_below === 'number' ? options.claude_below : 70,
+    claudeView: options.claude_view === 'conversation' ? 'conversation' : 'summary',
+    reviewModel:
+      typeof options.review_model === 'string' && options.review_model.trim() ? options.review_model.trim() : 'haiku',
+    claudeOnJevFailure: options.claude_on_jev_failure !== false,
+  }
+
   let prompt = ''
   let errors: string[] = []
   let turnSeq = 0
@@ -118,19 +208,18 @@ export const register: Register = (on, options) => {
       await update($, verdict, () => v)
       await update($, phase, (): Phase => 'idle')
       if (options.toast !== false && v.status !== 'nokey') {
-        const detail =
-          typeof v.confidence === 'number' ? ` (${Math.round(v.confidence * 100)}%)` : v.error ? ` (${v.error})` : ''
-        $.ui.toast(`${LOOK[v.status].words}${detail}`)
+        const more = v.source === 'jev' && typeof v.confidence === 'number' ? ` (${pct(v.confidence)})` : detail(v)
+        $.ui.toast(`${LOOK[v.status].words}${more}`)
       }
     }
 
     // Judge after the turn has settled, off this dispatch.
     $.clock.after(0, () => {
-      apiKey($, options.api_key)
-        .then(key => (key ? askJev($, key, turn) : ({ status: 'nokey' } as Verdict)))
+      judge($, settings, turn)
         .catch(
           (err: unknown): Verdict => ({
             status: 'error',
+            source: 'jev',
             error: err instanceof Error ? err.message.slice(0, 60) : 'request failed',
           }),
         )
@@ -138,7 +227,7 @@ export const register: Register = (on, options) => {
         .catch(() => {})
     })
     $.clock.after(GIVE_UP_MS, () => {
-      settle({ status: 'error', error: 'no answer in 60 s' }).catch(() => {})
+      settle({ status: 'error', source: 'jev', error: 'no answer in 2 min' }).catch(() => {})
     })
 
     return done
@@ -162,8 +251,6 @@ export const register: Register = (on, options) => {
     }
 
     const look = LOOK[v!.status] ?? { label: v!.status }
-    const conf = typeof v!.confidence === 'number' ? ` ${Math.round(v!.confidence * 100)}%` : ''
-    const detail = v!.status === 'error' && v!.error ? ` (${v!.error})` : ''
 
     return (
       <Box>
@@ -171,10 +258,7 @@ export const register: Register = (on, options) => {
         <Text bold color={look.color} dimColor={look.color === undefined}>
           {look.label}
         </Text>
-        <Text dimColor>
-          {conf}
-          {detail}
-        </Text>
+        <Text dimColor>{detail(v!)}</Text>
       </Box>
     )
   })

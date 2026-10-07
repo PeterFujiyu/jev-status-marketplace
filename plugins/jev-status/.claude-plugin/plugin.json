@@ -1,7 +1,7 @@
 {
   "name": "jev-status",
-  "version": "0.2.1",
-  "description": "Asks TypeSafe Jev whether each turn left the task done, needaction or failed, and shows the verdict above the prompt",
+  "version": "0.3.0",
+  "description": "Asks TypeSafe Jev whether each turn left the task done, needaction or failed (and Claude when Jev is unsure), and shows the verdict above the prompt",
   "author": { "name": "peter" },
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -16,6 +16,31 @@
       "type": "boolean",
       "title": "Toast each verdict",
       "description": "Also show each verdict as a toast",
+      "default": true
+    },
+    "claude_below": {
+      "type": "number",
+      "title": "Ask Claude below (% Jev confidence)",
+      "description": "When Jev's confidence is under this percentage, ask Claude for a second opinion and show Claude's answer. 0 never asks.",
+      "default": 70
+    },
+    "claude_view": {
+      "type": "string",
+      "title": "Claude's view",
+      "description": "summary: Claude reads what Jev read (prompt, final message, tool errors). conversation: Claude reads the whole session; this always uses the session's own model.",
+      "options": ["summary", "conversation"],
+      "default": "summary"
+    },
+    "review_model": {
+      "type": "string",
+      "title": "Claude review model",
+      "description": "Model for Claude's review in the summary view: an alias (haiku, sonnet, opus) or a full model id.",
+      "default": "haiku"
+    },
+    "claude_on_jev_failure": {
+      "type": "boolean",
+      "title": "Ask Claude when Jev can't answer",
+      "description": "With no TypeSafe key or a Jev error, ask Claude instead of showing the error",
       "default": true
     }
   }
